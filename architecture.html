@@ -1,0 +1,1185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mable — How the Whole System Works</title>
+<style>
+  :root {
+    --bg: #f8f9fc;
+    --bg2: #eef0f6;
+    --card: #ffffff;
+    --card2: #f3f4f9;
+    --line: #e2e4ec;
+    --text: #111827;
+    --muted: #4b5563;
+    --accent: #2563eb;
+    --accent2: #7c3aed;
+    --green: #059669;
+    --orange: #d97706;
+    --pink: #db2777;
+    --yellow: #b45309;
+    --border: #e2e4ec;
+    --radius: 16px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: radial-gradient(900px 500px at 70% -5%, #dde8ff 0%, transparent 55%),
+                radial-gradient(700px 400px at 5% 10%, #ede8ff 0%, transparent 50%),
+                var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 16px;
+  }
+  a { color: var(--accent); }
+  p { margin: 0 0 16px; }
+  p:last-child { margin-bottom: 0; }
+  h1, h2, h3 { text-wrap: balance; }
+  .lead, .prose, .card > p { text-wrap: pretty; max-width: 70ch; }
+  .caption, .compact { font-size: 14px; line-height: 1.6; }
+  .muted { color: var(--muted); }
+  .mt-0 { margin-top: 0 !important; }
+  .mt-sm { margin-top: 10px; }
+  .mt-md { margin-top: 18px; }
+  .mt-lg { margin-top: 24px; }
+  .mt-xl { margin-top: 28px; }
+  .mb-0 { margin-bottom: 0 !important; }
+  .card.flush { padding: 0; overflow: hidden; }
+  pre.flush { margin: 0; border: none; border-radius: 0; }
+  .card h4:first-child, .card h3:first-child { margin-top: 0; }
+  .control-select {
+    background: var(--card2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    margin-left: 6px;
+    font-size: 14px;
+  }
+
+  /* ---------- layout ---------- */
+  header.hero {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 70px 24px 30px;
+    text-align: center;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 13px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: rgba(37,99,235,.10);
+    border: 1px solid rgba(37,99,235,.28);
+    padding: 6px 14px;
+    border-radius: 999px;
+    margin-bottom: 22px;
+  }
+  h1 {
+    font-size: clamp(34px, 6vw, 58px);
+    line-height: 1.05;
+    margin: 0 0 16px;
+    background: linear-gradient(90deg, #111827, #2563eb 60%, #7c3aed);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .subtitle {
+    font-size: clamp(16px, 2.4vw, 20px);
+    color: var(--muted);
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: rgba(248,249,252,.94);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  nav.toc a {
+    font-size: 13px;
+    color: var(--muted);
+    text-decoration: none;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    transition: .2s;
+  }
+  nav.toc a:hover { color: var(--text); border-color: var(--border); background: var(--card); }
+
+  section {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 56px 24px;
+    scroll-margin-top: 64px;
+  }
+  .section-tag {
+    font-size: 13px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent2);
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+  h2 { font-size: clamp(28px, 3.5vw, 38px); line-height: 1.1; margin: 0 0 12px; }
+  h3 { font-size: 20px; line-height: 1.3; margin: 24px 0 8px; }
+  h4 { font-size: 18px; line-height: 1.35; margin: 20px 0 8px; }
+  p.lead { color: var(--muted); font-size: 18px; line-height: 1.6; max-width: 70ch; }
+
+  .card {
+    background: linear-gradient(180deg, var(--card), var(--bg2));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+  }
+  .grid { display: grid; gap: 18px; }
+  .grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .grid-4 { grid-template-columns: repeat(4, 1fr); }
+  @media (max-width: 860px) { .grid-2, .grid-4 { grid-template-columns: 1fr; } }
+
+  .pill { display:inline-block; font-size:12px; padding:3px 10px; border-radius:999px; border:1px solid var(--border); color:var(--muted); margin: 2px 4px 2px 0;}
+
+  code, pre {
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  code.inline {
+    background: rgba(124,92,255,.10);
+    color: #5b21b6;
+    padding: 2px 7px;
+    border-radius: 6px;
+    font-size: .9em;
+  }
+  pre {
+    background: #1e1e2e;
+    border: 1px solid #2e2e3a;
+    border-radius: 12px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-size: 13px;
+    color: #cdd6f4;
+  }
+
+  /* ---------- four component cards ---------- */
+  .component {
+    position: relative;
+    overflow: hidden;
+  }
+  .component .icon {
+    width: 46px; height: 46px;
+    border-radius: 12px;
+    display: grid; place-items: center;
+    font-size: 22px; font-weight: 800;
+    margin-bottom: 14px;
+  }
+  .c-site .icon { background: rgba(46,194,139,.16); color: var(--green); }
+  .c-script .icon { background: rgba(255,210,77,.16); color: var(--yellow); }
+  .c-api .icon { background: rgba(91,140,255,.16); color: var(--accent); }
+  .c-pipe .icon { background: rgba(124,92,255,.16); color: var(--accent2); }
+  .component h3 { margin-top: 0; }
+  .component .role { color: var(--muted); font-size: 14px; }
+  .component p { font-size: 14px; color: var(--muted); }
+
+  /* ---------- animated flow ---------- */
+  .flow-wrap { margin-top: 18px; }
+  .flow-controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:18px;}
+  button.btn {
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    border: none; color: white; font-weight: 700; font-size: 14px;
+    padding: 10px 18px; border-radius: 10px; cursor: pointer;
+    transition: transform .12s, filter .2s;
+  }
+  button.btn:hover { filter: brightness(1.1); }
+  button.btn:active { transform: translateY(1px); }
+  button.btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+
+  .stage-status { color: var(--muted); font-size: 14px; min-height: 20px; }
+
+  .pipeline-track {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    position: relative;
+    flex-wrap: wrap;
+  }
+  .node {
+    flex: 1 1 0;
+    min-width: 120px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px 12px;
+    text-align: center;
+    position: relative;
+    transition: .3s;
+    margin: 6px;
+  }
+  .node .nlabel { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .node .ntitle { font-weight: 700; margin-top: 4px; font-size: 15px; }
+  .node .ndesc { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+  .node.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(37,99,235,.30), 0 8px 30px rgba(37,99,235,.15);
+    transform: translateY(-4px);
+    background: var(--card2);
+  }
+  .node.dropped {
+    border-color: var(--pink);
+    box-shadow: 0 0 0 2px rgba(255,92,168,.35);
+  }
+  .node .stage-num {
+    position:absolute; top:-10px; left:-10px;
+    width:24px; height:24px; border-radius:50%;
+    background: var(--accent2); color:white; font-size:12px; font-weight:700;
+    display:grid; place-items:center;
+  }
+
+  /* travelling packet */
+  .pipeline-viz { position: relative; padding: 30px 0 10px; }
+  .rail {
+    position: relative;
+    height: 6px;
+    background: linear-gradient(90deg, var(--green), var(--yellow), var(--accent), var(--accent2));
+    border-radius: 999px;
+    margin: 28px 8px 8px;
+    opacity: .35;
+  }
+  .packet {
+    position: absolute;
+    top: -14px;
+    left: 0;
+    width: 34px; height: 34px;
+    border-radius: 10px;
+    background: radial-gradient(circle at 30% 30%, #fff, var(--accent));
+    box-shadow: 0 0 16px rgba(37,99,235,.5);
+    display:grid; place-items:center;
+    font-size: 16px;
+    transition: left 1s cubic-bezier(.5,0,.3,1), opacity .4s, background .3s;
+    z-index: 5;
+  }
+  .packet.dropped { background: radial-gradient(circle at 30% 30%, #fff, var(--pink)); opacity: 0; transform: translateY(40px); }
+
+  .log {
+    margin-top: 16px;
+    background: #1e1e2e;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 13px;
+    min-height: 120px;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .log .line { opacity: 0; animation: fadein .3s forwards; color: #cdd6f4; }
+  .log .line .t { color: var(--muted); }
+  .log .ok { color: var(--green); }
+  .log .warn { color: var(--orange); }
+  .log .info { color: var(--accent); }
+  @keyframes fadein { to { opacity: 1; } }
+
+  /* meet the cast — staggered settle animation (content is visible by default) */
+  .cast-anim {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  .cast-anim .icon {
+    transform: scale(1) rotate(0deg);
+  }
+  .cast-animate .cast-anim {
+    animation: cast-settle 0.7s cubic-bezier(0.25, 1, 0.5, 1) var(--cast-delay, 0s) both;
+  }
+  .cast-animate .cast-anim .icon {
+    animation: cast-icon 0.6s cubic-bezier(0.25, 1, 0.5, 1) var(--cast-delay, 0s) both;
+  }
+  .grid-4 > .cast-anim:nth-child(1) { --cast-delay: 0ms; }
+  .grid-4 > .cast-anim:nth-child(2) { --cast-delay: 90ms; }
+  .grid-4 > .cast-anim:nth-child(3) { --cast-delay: 180ms; }
+  .grid-4 > .cast-anim:nth-child(4) { --cast-delay: 270ms; }
+  @keyframes cast-settle {
+    from { transform: translateY(18px) scale(0.98); }
+    to { transform: translateY(0) scale(1); }
+  }
+  @keyframes cast-icon {
+    from { transform: scale(0.85) rotate(-8deg); }
+    to { transform: scale(1) rotate(0deg); }
+  }
+
+  /* respect reduced motion preferences */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* steps */
+  .steps { counter-reset: step; display:grid; gap: 14px; }
+  .step {
+    display: flex; gap: 16px; align-items: flex-start;
+    background: var(--card); border:1px solid var(--border);
+    border-radius: 14px; padding: 18px;
+  }
+  .step .num {
+    counter-increment: step;
+    flex: 0 0 auto;
+    width: 38px; height: 38px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display:grid; place-items:center; font-weight:800;
+  }
+  .step .num::before { content: counter(step); }
+  .step h4 { margin: 0 0 4px; font-size: 17px; }
+  .step p { margin: 0; color: var(--muted); font-size: 15px; }
+
+  .legend { display:flex; gap:18px; flex-wrap:wrap; margin: 14px 0; font-size:13px; color:var(--muted);}
+  .legend span { display:inline-flex; align-items:center; gap:6px;}
+  .dot { width:12px;height:12px;border-radius:50%;display:inline-block;}
+
+  footer {
+    max-width: 1100px; margin: 0 auto; padding: 40px 24px 80px;
+    color: var(--muted); font-size: 14px; text-align:center;
+    border-top: 1px solid var(--border);
+  }
+  .kv { display:grid; grid-template-columns: 140px 1fr; gap:6px 16px; font-size:14px; }
+  .kv dt { color: var(--accent); font-weight:600; }
+  .kv dd { margin:0; color: var(--muted); }
+  .arrow-down { text-align:center; color: var(--muted); font-size: 24px; margin: 6px 0; }
+
+  /* ---------- deep-dive extras ---------- */
+  table.cmp {
+    width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 8px;
+  }
+  table.cmp th, table.cmp td {
+    text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top;
+  }
+  table.cmp th { color: var(--accent); font-weight: 700; }
+  table.cmp td:first-child { color: var(--text); font-weight: 600; white-space: nowrap; }
+  table.cmp td { color: var(--muted); }
+  table.cmp tr.chosen td:first-child { color: var(--green); }
+  table.cmp tr.chosen { background: rgba(5,150,105,.07); }
+
+  .note {
+    border-left: 3px solid var(--accent2);
+    background: rgba(124,92,255,.08);
+    padding: 12px 16px; border-radius: 0 10px 10px 0;
+    color: var(--muted); font-size: 14px; line-height: 1.6; margin: 14px 0;
+  }
+  .note p { margin-bottom: 12px; }
+  .note p:last-child { margin-bottom: 0; }
+  .note strong { color: var(--text); }
+  .why { color: var(--green); font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; }
+
+  details.stage {
+    border: 1px solid var(--border); border-radius: 12px; margin: 10px 0;
+    background: var(--card); overflow: hidden;
+  }
+  details.stage > summary {
+    cursor: pointer; padding: 14px 18px; font-weight: 700; font-size: 15px;
+    list-style: none; display: flex; align-items: center; gap: 10px;
+  }
+  details.stage > summary::-webkit-details-marker { display: none; }
+  details.stage > summary::before { content: "▸"; color: var(--accent); transition: transform .2s; }
+  details.stage[open] > summary::before { transform: rotate(90deg); }
+  details.stage > summary .tag {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border);
+    color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-left: auto;
+  }
+  details.stage .body { padding: 0 18px 16px; color: var(--text); font-size: 14px; line-height: 1.7; }
+  details.stage .body p { max-width: 70ch; margin-bottom: 12px; }
+  details.stage .body p:last-child { margin-bottom: 0; }
+  details.stage .body pre { margin: 12px 0; }
+  .order-flow { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin: 8px 0 4px; font-size:13px; }
+  .order-flow .chip { background:var(--card2); border:1px solid var(--border); border-radius:8px; padding:5px 10px; }
+  .order-flow .sep { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="badge">System Architecture · Plain-English Guide</div>
+  <h1>How the Mable Tracking System Works</h1>
+  <p class="subtitle">Four pieces work together to capture what users do on a shop, clean &amp; enrich that data, and turn it into live analytics. This page walks through each piece and shows the journey of a single event — step by step, with an animation.</p>
+</header>
+
+<nav class="toc">
+  <a href="#bigpicture">Big Picture</a>
+  <a href="#pieces">The 4 Pieces</a>
+  <a href="#website">1 · Website</a>
+  <a href="#script">2 · Tracking Script</a>
+  <a href="#api">3 · Go API</a>
+  <a href="#pipeline">4 · Pipeline Library</a>
+  <a href="#journey">Animated Journey</a>
+  <a href="#why">Why This Design</a>
+</nav>
+
+<!-- BIG PICTURE -->
+<section id="bigpicture">
+  <div class="section-tag">The Big Picture</div>
+  <h2>One sentence, then the map</h2>
+  <p class="lead">A shopper uses a <strong>website</strong>. A tiny <strong>script</strong> riding along quietly notices what they do and mails those notes to a <strong>Go API</strong>. The API runs every note through a reusable <strong>pipeline library</strong> that cleans, filters and enriches it, then stores the result so a dashboard can show live charts.</p>
+
+  <div class="card mt-lg">
+    <div class="legend">
+      <span><i class="dot" style="background:var(--green)"></i> Website (ecom)</span>
+      <span><i class="dot" style="background:var(--yellow)"></i> Tracking Script</span>
+      <span><i class="dot" style="background:var(--accent)"></i> Go API (Gin)</span>
+      <span><i class="dot" style="background:var(--accent2)"></i> Pipeline Library</span>
+      <span><i class="dot" style="background:var(--muted)"></i> SQLite DB</span>
+    </div>
+<pre>
+   ┌──────────────┐   user clicks,    ┌───────────────┐   batched JSON    ┌────────────────────────────┐
+   │   WEBSITE    │   views, buys     │  TRACKING     │   over HTTP       │        GO API (Gin)         │
+   │  (Remix SPA) │ ────────────────▶ │  SCRIPT       │ ────────────────▶ │  POST /api/events  → 202    │
+   │  shop + cart │   in the browser  │ (tracker.js)  │  sendBeacon/fetch │  stamps IP + time, queues   │
+   └──────▲───────┘                   └───────────────┘                   └──────────────┬─────────────┘
+          │  live charts                                                                 │ bounded channel
+          │  GET /api/stats                                                              ▼
+          │                                                            ┌────────────────────────────────┐
+          │                                                            │     PIPELINE  LIBRARY  RUN      │
+   ┌──────┴───────┐         reads (read-only)                          │ consent→normalize→tracked→geo  │
+   │  DASHBOARD   │ ◀──────────────────────────────┐                   │ →churn→dedup→collect           │
+   └──────────────┘                                │                   └──────────────┬─────────────────┘
+                                                    │                                  │ cleaned events + per-stage stats
+                                              ┌─────┴───────────────────────────────────▼─────┐
+                                              │             SQLite  (WAL mode)                 │
+                                              │   users  ·  events  ·  stage_metrics           │
+                                              └────────────────────────────────────────────────┘
+</pre>
+  </div>
+</section>
+
+<!-- 4 PIECES -->
+<section id="pieces">
+  <div class="section-tag">Meet the Cast</div>
+  <h2>The four pieces &amp; their one job each</h2>
+  <p class="lead">Each piece does exactly one thing well. They only talk through clear contracts (HTTP + JSON), so any one can be replaced without touching the others.</p>
+
+  <div class="grid grid-4 mt-lg">
+    <div class="card component c-site cast-anim">
+      <div class="icon">🛍️</div>
+      <h3>Website</h3>
+      <div class="role"><code class="inline">ecom/</code> · Remix SPA</div>
+      <p>The shop the user sees: products, cart, checkout, login. Built with React Router 7, React 19, Zustand, Tailwind.</p>
+    </div>
+    <div class="card component c-script cast-anim">
+      <div class="icon">📡</div>
+      <h3>Tracking Script</h3>
+      <div class="role"><code class="inline">scripts/tracker.js</code></div>
+      <p>A tiny, dependency-free script that watches user actions and sends them to the API — without ever slowing or breaking the page.</p>
+    </div>
+    <div class="card component c-api cast-anim">
+      <div class="icon">⚙️</div>
+      <h3>Go API</h3>
+      <div class="role"><code class="inline">api/</code> · Gin + SQLite</div>
+      <p>Receives events, handles login (JWT cookie), runs events through the pipeline, stores results, and serves analytics.</p>
+    </div>
+    <div class="card component c-pipe cast-anim">
+      <div class="icon">🔧</div>
+      <h3>Pipeline Library</h3>
+      <div class="role"><code class="inline">pipeline/</code> · generic Go</div>
+      <p>A reusable, concurrent assembly line. Filters, transforms &amp; enriches a stream of events in parallel batches.</p>
+    </div>
+  </div>
+</section>
+
+<!-- WEBSITE -->
+<section id="website">
+  <div class="section-tag">Piece 1 of 4 · The Front Door</div>
+  <h2>🛍️ The Website (e-commerce SPA)</h2>
+  <p class="lead">This is the shop the user actually clicks around in. It runs entirely in the browser as a Single Page Application.</p>
+
+  <div class="grid grid-2 mt-md">
+    <div class="card">
+      <h3>What the user can do</h3>
+      <div>
+        <span class="pill">Sign up / Log in</span>
+        <span class="pill">Browse products</span>
+        <span class="pill">Search &amp; filter</span>
+        <span class="pill">Add to cart</span>
+        <span class="pill">Multi-step checkout</span>
+        <span class="pill">See live dashboard</span>
+      </div>
+      <p class="compact muted mt-sm">Products come from a free public API (DummyJSON). The cart is saved in the browser so it survives a refresh or a login redirect.</p>
+    </div>
+    <div class="card">
+      <h3>Two ways it talks to the API</h3>
+      <dl class="kv">
+        <dt>Login / data</dt><dd>Calls the Go API with <code class="inline">credentials: "include"</code> so the secure cookie travels along.</dd>
+        <dt>The JWT</dt><dd>Lives <strong>only</strong> in an <code class="inline">HttpOnly</code> cookie — JavaScript can never read it (safe from XSS).</dd>
+        <dt>Tracking</dt><dd>Loads <code class="inline">tracker.js</code> via a <code class="inline">&lt;script&gt;</code> tag, exactly like a real third-party site would.</dd>
+        <dt>Charts</dt><dd>The dashboard reads <code class="inline">GET /api/stats</code> to draw live numbers.</dd>
+      </dl>
+    </div>
+  </div>
+  <div class="card mt-md">
+    <h3>Key idea: tracking is invisible &amp; non-blocking</h3>
+    <p class="muted mb-0">The shop never waits on tracking. If the API is down, the page still works perfectly — the script just quietly stores events for later. A <strong>consent banner</strong> gates everything: nothing is sent until the user accepts.</p>
+  </div>
+</section>
+
+<!-- SCRIPT -->
+<section id="script">
+  <div class="section-tag">Piece 2 of 4 · The Quiet Observer</div>
+  <h2>📡 The Tracking Script (<code class="inline">tracker.js</code>)</h2>
+  <p class="lead">A small standalone file you drop onto any site. It exposes <code class="inline">window.mable</code> and turns user actions into well-formed events for the API. Its golden rule: <strong>never break or slow down the host page.</strong></p>
+
+  <div class="grid grid-2 mt-md">
+    <div class="card">
+      <h3>What it captures (in the browser)</h3>
+      <div>
+        <span class="pill">PageView</span><span class="pill">Click</span>
+        <span class="pill">AddToCart</span><span class="pill">Checkout</span>
+        <span class="pill">PaymentInfoAdded</span><span class="pill">Purchase</span>
+        <span class="pill">Lead (email form)</span>
+      </div>
+      <p class="compact muted mt-sm">Plus context the browser can see: user agent, language, timezone, screen size, referrer, URL, session id, and any logged-in user id.</p>
+    </div>
+    <div class="card">
+      <h3>What it deliberately does NOT do</h3>
+      <p class="compact muted mb-0">It never figures out your <strong>IP address</strong> or <strong>geo-location</strong>. Why? You can't trust the client for that. The <em>server</em> adds IP, receipt time and geo. This is the famous <strong>browser-vs-server split</strong>.</p>
+    </div>
+  </div>
+
+  <div class="card mt-md">
+    <h3>The clever bits that keep it bulletproof</h3>
+    <div class="grid grid-2">
+      <div>
+        <h4 class="mt-sm">🪶 Non-blocking transport</h4>
+        <p class="compact muted">Uses <code class="inline">navigator.sendBeacon</code> (fire-and-forget, survives page close), falling back to <code class="inline">fetch(keepalive)</code>. Events are <strong>batched</strong> and flushed every few seconds or when the tab hides.</p>
+        <h4>🔁 Resilient retry</h4>
+        <p class="compact muted">If a send fails, events are saved to <code class="inline">localStorage</code> and replayed automatically when the browser comes back <code class="inline">online</code>.</p>
+      </div>
+      <div>
+        <h4 class="mt-sm">🔒 Privacy-aware</h4>
+        <p class="compact muted">Nothing leaves the browser until <code class="inline">setConsent(true)</code>. No consent → events wait in a local queue.</p>
+        <h4>📐 Contract-correct</h4>
+        <p class="compact muted">Every <code class="inline">properties</code> value is coerced to a string to match the API's <code class="inline">map[string]string</code>. <code class="inline">amount</code> &amp; <code class="inline">currency</code> are promoted to top-level fields.</p>
+      </div>
+    </div>
+    <h4>The data layer (no events lost before load)</h4>
+<pre>&lt;script src="/tracker.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+  window.mable.init({ endpoint: "http://localhost:8080/api/events" });
+  window.mable.setConsent(true);
+  window.mable.addToCart({ id: 42, amount: 19.99, currency: "usd" });
+&lt;/script&gt;</pre>
+    <p class="compact muted mb-0">A Google-style <code class="inline">window.mableDataLayer</code> queue means calls made <em>before</em> the script finishes loading are kept and replayed.</p>
+  </div>
+</section>
+
+<!-- API -->
+<section id="api">
+  <div class="section-tag">Piece 3 of 4 · The Brain</div>
+  <h2>⚙️ The Go API (Gin + SQLite)</h2>
+  <p class="lead">The server that receives events, handles auth, runs the pipeline, stores everything, and answers the dashboard. It is built so tracking <strong>never</strong> blocks an HTTP response.</p>
+
+  <h3>The endpoints</h3>
+  <div class="card flush">
+<pre class="flush">POST  /api/events        ← ingest one event or an array → returns 202 instantly
+POST  /api/auth/signup   ← create account, set HttpOnly JWT cookie
+POST  /api/auth/login    ← log in, set cookie
+GET   /api/auth/me       ← who am I? (reads cookie)
+GET   /api/stats         ← analytics for the dashboard (cookie-gated)
+GET   /health            ← is the service alive? (pings DB)
+GET   /metrics           ← Prometheus-style counters</pre>
+  </div>
+
+  <h3>The receive-and-queue trick (why it feels instant)</h3>
+  <div class="grid grid-2">
+    <div class="step"><div class="num"></div><div><h4>HTTP handler does almost nothing</h4><p>It validates size, rejects junk, stamps the real <strong>IP</strong> + <strong>received-at time</strong> onto the event, drops it onto a <strong>bounded in-memory channel</strong>, and immediately replies <code class="inline">202 Accepted</code>.</p></div></div>
+    <div class="step"><div class="num"></div><div><h4>One background worker owns the heavy work</h4><p>A single goroutine reads from that channel and runs the pipeline. Because only one writer touches the database, the write path is naturally race-free.</p></div></div>
+  </div>
+
+  <div class="card mt-md">
+    <h3>The "windowed" pipeline (a key design decision)</h3>
+    <p class="muted">The worker collects events into a <strong>window</strong>. A window closes when it hits <code class="inline">WINDOW_MAX_EVENTS</code> (2048) <em>or</em> <code class="inline">WINDOW_DURATION</code> (500ms) — whichever comes first. Each closed window is one pipeline run, after which it writes (a) the cleaned events and (b) the <strong>per-stage metrics</strong> for that window. This is what makes live, sub-second metrics possible instead of only at shutdown.</p>
+  </div>
+
+  <div class="grid grid-2 mt-md">
+    <div class="card">
+      <h3>Auth &amp; cross-origin</h3>
+      <p class="compact muted mb-0">Passwords hashed with <strong>bcrypt</strong>. Login issues an <strong>HS256 JWT</strong> in an <code class="inline">HttpOnly</code> cookie. CORS is locked to the exact SPA origin with credentials allowed — no wildcards. Login returns a generic 401 for both wrong email and wrong password (no user enumeration).</p>
+    </div>
+    <div class="card">
+      <h3>Back-pressure &amp; overload</h3>
+      <p class="compact muted mb-0">The ingest channel is bounded. If it's full, the event is <strong>dropped and counted</strong> (<code class="inline">mable_events_dropped_total</code>) rather than blocking the handler. The motto: <em>freshness over completeness</em> — tracking must not stall the UI.</p>
+    </div>
+  </div>
+</section>
+
+<!-- PIPELINE -->
+<section id="pipeline">
+  <div class="section-tag">Piece 4 of 4 · The Assembly Line — Deep Dive</div>
+  <h2>🔧 The Pipeline Library, in depth</h2>
+  <p class="lead">A generic, concurrent <code class="inline">Pipeline[T]</code> — an assembly line of <strong>stages</strong>. This section explains <em>why</em> it exists, <em>why it's generic</em>, how the concurrency engine works, and what every single stage does under the hood (with the real code from this repo).</p>
+
+  <!-- WHY A LIBRARY -->
+  <h3>1 · Why build a library at all?</h3>
+  <div class="card">
+    <p class="mt-0">The brief required the tracking API to consume a <strong>reusable</strong> pipeline, not a one-off function buried in the API. The payoff: there is exactly <strong>one</strong> piece of stream-processing code, and it has <strong>two callers</strong>:</p>
+    <div class="grid grid-2">
+      <div><h4 class="mt-sm">Caller A — the API</h4><p class="compact">Each ingest window builds a pipeline and runs that window's events through it on the way to SQLite. This is the <em>production</em> path.</p></div>
+      <div><h4 class="mt-sm">Caller B — the benchmarks</h4><p class="compact">The <code class="inline">bench_test.go</code> harness builds a near-identical pipeline to measure throughput at 10 → 1M events.</p></div>
+    </div>
+    <p class="why">Why it matters</p>
+    <p class="compact mb-0">Because the API and the benchmark share the same code, the thing you <strong>measure</strong> is the thing you <strong>ship</strong>. No "demo pipeline vs real pipeline" drift. The library knows nothing about HTTP, SQLite, or events — it's pure stream plumbing, so it can be lifted into any other service unchanged.</p>
+  </div>
+
+  <!-- WHY GENERIC -->
+  <h3>2 · Why generic (<code class="inline">Pipeline[T]</code>) instead of the alternatives?</h3>
+  <p class="muted">This was the single most important design decision in the library. Go gives several ways to build a reusable pipeline; here's why <strong>homogeneous generics</strong> won.</p>
+  <div class="card">
+    <table class="cmp">
+      <thead><tr><th>Approach</th><th>What it means</th><th>Why it was rejected / chosen</th></tr></thead>
+      <tbody>
+        <tr class="chosen">
+          <td>✅ Generic <code class="inline">Pipeline[T]</code></td>
+          <td>One element type flows end-to-end. A stage is <code class="inline">func(T) T</code>-ish. Chosen.</td>
+          <td><strong>Compile-time type safety</strong> (the compiler rejects a stage that doesn't match <code>T</code>), <strong>no boxing</strong> of every element into an interface, and an <strong>allocation-free hot path</strong>. Reads naturally: <code>p.Filter(...).Map(...)</code>.</td>
+        </tr>
+        <tr>
+          <td>❌ Type erasure (<code class="inline">any</code>)</td>
+          <td>Channels carry <code class="inline">interface{}</code>; every stage type-asserts back to its concrete type.</td>
+          <td>Each of millions of events would be <strong>boxed into an interface</strong> (heap allocation + GC pressure), every stage pays a <strong>runtime type assertion</strong> that can panic, and bugs surface at <em>runtime</em> not compile time. Fatal for a hot ingest path.</td>
+        </tr>
+        <tr>
+          <td>❌ Code generation</td>
+          <td>Generate a bespoke pipeline per type with <code class="inline">go generate</code>.</td>
+          <td>Extra build step, generated code to review, and worse ergonomics than real generics — which Go has had since 1.18. Solving a problem the language already solved.</td>
+        </tr>
+        <tr>
+          <td>❌ Hard-coded <code class="inline">Event</code> pipeline</td>
+          <td>Skip generics; write the pipeline directly against the Mable event struct.</td>
+          <td>Not reusable (the brief's core requirement), and couples the plumbing to one payload. The benchmark's <code>TestStruct</code> couldn't share it.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <strong>The honest trade-off we accept:</strong> a homogeneous <code class="inline">Pipeline[T]</code> <em>can't change the element type mid-stream</em> (you can't turn a <code>RawEvent</code> into a <code>CleanEvent</code> as a new type). The fix is idiomatic: make <code>T</code> a struct that <strong>carries its variants</strong>. That's exactly what the API does — control data like consent and server-receipt-time ride inside the event's <code class="inline">Properties</code> map under underscore-prefixed keys (<code>_consent</code>, <code>_received_at</code>), then get stripped before persistence. The element stays one type the whole way down.
+  </div>
+  <div class="note">
+    <strong>The one place a second type appears:</strong> the <code class="inline">Reduce[T, K, R]</code> sink, which folds a stream of <code>T</code> into a keyed <code>map[K]R</code> — genuinely a different output type. Because Go methods can't introduce new type parameters, <code>Reduce</code> is a <strong>package function</strong>, not a method on <code>Pipeline[T]</code>. That's not a quirk; it's the type system honestly reflecting that a reduce changes the type.
+  </div>
+
+  <!-- CONCURRENCY ENGINE -->
+  <h3>3 · The concurrency engine — how an event actually moves</h3>
+  <div class="card">
+    <p class="mt-0">A pipeline is not a simple loop. When you call <code class="inline">Collect</code> or <code class="inline">Reduce</code>, the runtime (<code class="inline">execute()</code>) wires up a chain of goroutines connected by <strong>bounded channels of batches</strong>:</p>
+<pre>source(chan T)
+   │
+   ▼  [ batcher goroutine ]  groups elements into []T of up to BatchSize,
+   │                         or flushes a partial batch after BatchTimeout
+   ▼
+head(chan []T, buffered)
+   │
+   ▼  [ stage 1 runner ]  ─ fans out to WorkerCount goroutines ─┐
+   │                        each: read batch → Process → write   │
+   ▼                                                             │ bounded
+chan []T  ──▶ [ stage 2 runner: WorkerCount workers ] ──▶ chan []T  ──▶ ... 
+   │                                                             │
+   ▼  [ sink drain ]  runs on ONE goroutine (single-threaded accumulator)
+   ▼
+ SQLite / map[K]R</pre>
+    <div class="grid grid-2 mt-sm">
+      <div>
+        <p class="why">Why batches?</p>
+        <p class="compact">Sending one element per channel operation would make channel + scheduler overhead dominate. Grouping into <code class="inline">[]T</code> <strong>amortises</strong> that cost. The <code class="inline">batcher</code> flushes either when the batch is full <em>or</em> a <code class="inline">BatchTimeout</code> (5ms) fires — so a trickle of events never stalls waiting to fill a batch.</p>
+        <p class="why">Why bounded channels?</p>
+        <p class="compact">A buffered-but-bounded channel (<code class="inline">ChannelBufferDepth</code> batches) means a slow stage <strong>blocks</strong> a fast upstream stage once the buffer fills. This is <strong>back-pressure for free</strong> — memory can never balloon, no matter the input volume. That's how 1M events run in bounded RAM.</p>
+      </div>
+      <div>
+        <p class="why">Why fan-out workers per stage?</p>
+        <p class="compact"><code class="inline">WorkerCount</code> goroutines (default = <code class="inline">NumCPU()</code>) all read from the same inbound channel, so a CPU-heavy stage uses every core. The cost: <strong>ordering is not preserved</strong> across a stage's workers — which is fine, because the only order-sensitive stage (keyed Reduce) is order-independent by construction.</p>
+        <p class="why">Why drain the sink on ONE goroutine?</p>
+        <p class="compact">The terminal sink (the SQLite writer or the Reduce accumulator) runs single-threaded. That makes the accumulator <strong>race-free without any locks</strong>, while still enjoying all the upstream parallelism. Simple and fast.</p>
+      </div>
+    </div>
+  </div>
+  <div class="note">
+    <strong>Tunable hyper-parameters</strong> (functional options on <code class="inline">New</code>): <code class="inline">WithBatchSize</code>, <code class="inline">WithWorkerCount</code>, <code class="inline">WithChannelBufferDepth</code>, <code class="inline">WithBatchTimeout</code>, <code class="inline">WithErrorPolicy</code>, <code class="inline">WithMetricsSink</code>. Invalid values are <strong>clamped</strong> (e.g. <code>WorkerCount &lt; 1 → 1</code>) so a degenerate config still runs correctly instead of deadlocking.
+  </div>
+
+  <!-- STAGE TYPES DEEP DIVE -->
+  <h3>4 · Every stage type, drilled down</h3>
+  <p class="muted">Each stage implements one tiny interface — that's the whole extension protocol:</p>
+<pre>type Stage[T any] interface {
+    Name() string                                              // for metrics + errors
+    Process(ctx, in []T) (out []T, dropped int, err error)     // batch in → batch out
+}</pre>
+  <p class="compact muted">A stage takes a batch and returns a batch (0..N out per element in), plus how many it deliberately <strong>dropped</strong>, plus an optional error. Click each to expand.</p>
+
+  <details class="stage" open>
+    <summary>Map <span class="tag">1 → 1 transform</span></summary>
+    <div class="body">
+      <p>Transforms each element into a new element of the same type. Pure and trivially parallel-safe.</p>
+<pre>func (s mapStage[T]) Process(_ ctx, in []T) ([]T, int, error) {
+    out := make([]T, len(in))
+    for i, v := range in { out[i] = s.fn(v) }   // never drops, never errors
+    return out, 0, nil
+}</pre>
+      <p class="why">Why built this way</p>
+      <p class="mb-0">It allocates a fresh output slice rather than mutating in place, so a Map is a pure function of its input — safe to run on many workers at once with zero coordination.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>Filter <span class="tag">drop on predicate</span></summary>
+    <div class="body">
+      <p>Keeps elements where the predicate is true; everything else is <strong>counted as dropped</strong> (not an error — a drop is normal, expected load-shedding).</p>
+<pre>for _, v := range in {
+    if s.pred(v) { out = append(out, v) } else { dropped++ }
+}
+return out, dropped, nil</pre>
+      <p class="why">Why drops are counted, not errored</p>
+      <p class="mb-0">Dropping a non-consenting or unknown event is the <em>correct</em> outcome, so it must not trip the error policy. Counting drops separately is what lets the dashboard show "X events shed at the consent gate" as a healthy signal.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>Generate <span class="tag">1 → N fan-out</span></summary>
+    <div class="body">
+      <p>Emits zero-or-more new elements per input element. If you want the original to survive, your function returns it alongside the new ones.</p>
+<pre>for _, v := range in { out = append(out, s.fn(v)...) }   // flatten 1→N</pre>
+      <p class="why">Why it exists</p>
+      <p class="mb-0">Some events naturally explode into several (e.g. a "cart purchased" event → one event per line-item). Generate models that without breaking the homogeneous-type rule, since every produced element is still a <code>T</code>.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>If <span class="tag">branch &amp; merge</span></summary>
+    <div class="body">
+      <p>Routes each element into one of two <strong>sub-pipelines</strong> by a predicate, runs them inline, then merges both outputs back into the single downstream stream.</p>
+<pre>thenOut, _, _ := applyStages(ctx, s.then, matched)    // run "then" stages
+elseOut, _, _ := applyStages(ctx, s.els,  others)     // run "else" stages
+return append(thenOut, elseOut...), drops, nil         // merge</pre>
+      <p class="why">Why sub-pipelines run inline</p>
+      <p class="mb-0">The branches execute synchronously within the worker that owns the batch, so each branch still benefits from the outer stage's fan-out, and an <code>If</code> is itself just a <code>Stage</code> — meaning you can nest <code>If</code> inside <code>If</code>. Sinks can't appear in a branch (a sink is terminal), only linear stages.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>Deduplicate <span class="tag">bounded-LRU drop</span></summary>
+    <div class="body">
+      <p>Drops elements whose key was seen before, using a <strong>bounded LRU</strong> seen-set (a map + doubly-linked list). This is the one built-in stage that holds mutable shared state, so it synchronises with a mutex.</p>
+<pre>s.mu.Lock(); defer s.mu.Unlock()              // all workers serialise here
+for _, v := range in {
+    k := s.key(v)
+    if _, seen := s.seen[k]; seen { dropped++; continue }   // repeat → drop
+    out = append(out, v)
+    s.seen[k] = s.order.PushFront(k)
+    if s.cap > 0 && s.order.Len() > s.cap {   // evict oldest when over cap
+        oldest := s.order.Back(); s.order.Remove(oldest); delete(s.seen, oldest.Value)
+    }
+}</pre>
+      <p class="why">Why bounded (and the trade-off)</p>
+      <p class="mb-0">An unbounded seen-set would grow forever — a memory leak at scale. Capping it keeps memory bounded; the price is that once a key is evicted, a much-later repeat is a <strong>false negative</strong> (it slips through). <code class="inline">capacity = 0</code> means exact/unbounded if you truly need it. The mutex is deliberate: exactness across the whole stream <em>requires</em> shared state, so dedup is a global synchronisation point by design.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>Reduce <span class="tag">terminal sink · T,K,R</span></summary>
+    <div class="body">
+      <p>Folds the entire stream into a keyed <code class="inline">map[K]R</code> — counts per event type, sums per user, etc. It's a <strong>sink</strong> (terminal), so it can't be chained into more <code>T</code> stages.</p>
+<pre>counts, metrics, _ := pipeline.Reduce(ctx, p, source,
+    func(e Event) string { return e.EventType },     // key   K
+    func() int { return 0 },                          // init  R
+    func(acc int, _ Event) int { return acc + 1 })    // fold  (acc,T)→R</pre>
+      <p class="why">Why global, not per-batch</p>
+      <p class="mb-0">Analytics aggregates are only meaningful over the <em>whole</em> stream, so the accumulator persists across every batch. It's drained on the single sink goroutine, so the <code>map[K]R</code> needs no locks. And as noted above, it's a package function because it introduces the new type parameters <code>K, R</code> that a method on <code>Pipeline[T]</code> cannot.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>Collect <span class="tag">terminal sink · back-pressure</span></summary>
+    <div class="body">
+      <p>Drains the stream into a caller-provided bounded sink (this is what the API uses to write to SQLite). The ready-made <code class="inline">ChannelSink[T]</code> has two policies:</p>
+      <dl class="kv">
+        <dt>Block</dt><dd>A full sink <strong>blocks</strong> the drain, propagating back-pressure all the way upstream. Use when you must not lose data.</dd>
+        <dt>DropOnFull</dt><dd>A full sink <strong>sheds</strong> the element and counts it (returns <code class="inline">ErrDropped</code>). Use when freshness beats completeness.</dd>
+      </dl>
+      <p class="why">Why two policies</p>
+      <p class="mb-0">Different callers have opposite needs. A billing pipeline wants Block (never drop money). A live-metrics pipeline wants DropOnFull (a stale number is worse than a missing one). The library refuses to decide for you — it exposes both and documents the consequence.</p>
+    </div>
+  </details>
+
+  <!-- ERROR POLICY + METRICS -->
+  <div class="grid grid-2 mt-md">
+    <div class="card">
+      <h3 class="mt-0">5 · Error &amp; panic handling</h3>
+      <p class="compact">Every stage call is wrapped by <code class="inline">safeProcess</code>, which <strong>recovers panics</strong> and converts them into a stage error (counting the whole batch as dropped) — a buggy stage can never crash a worker goroutine. Then the policy decides:</p>
+      <dl class="kv">
+        <dt>SkipAndCount</dt><dd><em>(default)</em> drop the bad batch's output, increment the stage's error counter, keep the stream alive. Right for streaming analytics — one poison event mustn't kill ingestion.</dd>
+        <dt>FailFast</dt><dd>cancel the whole run's context on the first error so every goroutine drains and exits cleanly. Right for batch jobs where correctness &gt; availability.</dd>
+      </dl>
+    </div>
+    <div class="card">
+      <h3 class="mt-0">6 · Per-stage metadata (not one number)</h3>
+      <p class="compact">The brief demanded per-<em>stage</em> metrics including errors and drops, not just one pipeline timing. Each stage emits a <code class="inline">StageMetric</code>: items in / out, dropped, errors, batches, total latency, <strong>p50 / p99</strong>, wall time and throughput.</p>
+      <p class="why">The clever bit: no locks on the hot path</p>
+      <p class="compact mb-0">Each worker accumulates its own <code class="inline">workerStat</code> (counts + a latency slice) <strong>locally</strong>. Only when the stage finishes are the per-worker stats <strong>merged</strong> into one <code>StageMetric</code> and percentiles computed. So the measured path itself stays contention-free — measuring doesn't slow the thing being measured. A <code class="inline">MetricsSink</code> seam can forward this snapshot to ClickHouse/Prometheus.</p>
+    </div>
+  </div>
+
+  <!-- THE REAL API PIPELINE -->
+  <h3>7 · The real ingest pipeline — every stage in the API path</h3>
+  <p class="muted">This is the exact assembly line the API builds for every window (from <code class="inline">internal/ingest/pipeline.go</code>). The <strong>order is deliberate</strong>, and below each stage is what it really does and why it sits where it sits.</p>
+  <div class="order-flow">
+    <span class="chip">① consent</span><span class="sep">→</span>
+    <span class="chip">② normalize</span><span class="sep">→</span>
+    <span class="chip">③ tracked</span><span class="sep">→</span>
+    <span class="chip">④ enrich_geo</span><span class="sep">→</span>
+    <span class="chip">⑤ churn_enrich</span><span class="sep">→</span>
+    <span class="chip">⑥ dedup</span><span class="sep">→</span>
+    <span class="chip">⑦ collect → SQLite</span>
+  </div>
+
+  <details class="stage" open>
+    <summary>① Filter "consent" <span class="tag">privacy gate, first</span></summary>
+    <div class="body">
+      <p>Drops any event that didn't carry consent: <code class="inline">e.Properties["_consent"] == "true"</code>. The handler stamped that in-band control key.</p>
+      <p class="why">Why first</p>
+      <p class="mb-0">Privacy-by-design: shed disallowed data <strong>as early as possible</strong> so no non-consenting event is ever normalised, enriched, or stored. It's also the cheapest stage, so it removes load before the expensive stages run.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>② Map "normalize" <span class="tag">clean &amp; canonicalise</span></summary>
+    <div class="body">
+      <p>Trims whitespace, canonicalises <code class="inline">event_type</code> to PascalCase (<code>"purchase" → "Purchase"</code>), defaults a zero timestamp to now, upper-cases currency, clamps a negative amount to 0, and <strong>bounds the payload</strong> — URL ≤ 2048 chars, ≤ 64 property keys, each value ≤ 1024 chars.</p>
+      <p class="why">Why second (before the whitelist)</p>
+      <p class="mb-0">This is a deliberate, correctness-driven ordering. If the whitelist ran first, <code>"purchase"</code> (lowercase) would be rejected as "unknown". Normalising <strong>before</strong> the <code>tracked</code> filter and <code>ChurnEnrich</code> means those stages compare against a single canonical spelling. The clamps also defend against a hostile oversized payload blowing up memory.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>③ Filter "tracked" <span class="tag">whitelist</span></summary>
+    <div class="body">
+      <p>Keeps only the seven canonical types — <code class="inline">PageView, Click, AddToCart, Checkout, PaymentInfoAdded, Purchase, Lead</code> — and drops everything else (counted).</p>
+      <p class="why">Why here</p>
+      <p class="mb-0">Runs right after normalize so it can trust the canonical spelling. Anything unrecognised (typo, probe, or an event the product doesn't care about) is shed before the costlier enrichment stages and before it can reach the database.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>④ Map "enrich_geo" <span class="tag">add server-side context</span></summary>
+    <div class="body">
+      <p>Adds fields the browser must NOT be trusted to provide: a synthetic <code class="inline">geo_region</code> derived from the server-seen IP, a <code class="inline">timezone</code>, and <code class="inline">device</code>/<code class="inline">browser</code> parsed from the user-agent — all written into <code>Properties</code>, no external network calls.</p>
+      <p class="why">Why server-side</p>
+      <p class="mb-0">This is the <strong>browser-vs-server split</strong> enforced in code: the script never sends IP or geo; the pipeline derives them from data only the server can see. Placed after the whitelist so we only spend enrichment effort on events we'll actually keep.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>⑤ ChurnEnrich <span class="tag">the example custom stage</span></summary>
+    <div class="body">
+      <p>The worked example of the <strong>extension protocol</strong> — a custom <code class="inline">Stage[Event]</code> added with <code class="inline">.Stage(...)</code>, zero changes to the core library. It attaches a churn-probability score to <code class="inline">Purchase</code> events and passes everything else through untouched.</p>
+<pre>func (c ChurnEnrich) Process(_ ctx, in []Event) ([]Event, int, error) {
+    for i, e := range in {
+        if e.EventType == "Purchase" { e.ChurnProbability = churnScore(e) }
+        out[i] = e
+    }
+    return out, 0, nil
+}</pre>
+      <p class="why">Why it's here</p>
+      <p class="mb-0">It proves the library is genuinely extensible — a future engineer adds a real ML-scoring stage the same way, without touching pipeline internals. The score itself is a deterministic placeholder (a hash of the user blended with amount) standing in for a real model call.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>⑥ Deduplicate "dedup" <span class="tag">collapse replays</span></summary>
+    <div class="body">
+      <p>Key = <code class="inline">sessionID | eventType | minute</code>. A replayed beacon (the tracker retries on reconnect) for the same session + type within the same minute collapses to one stored event.</p>
+      <p class="why">Why just before the sink, and the windowing caveat</p>
+      <p class="mb-0">It sits last so only surviving, enriched events are considered — no point de-duping things you were going to drop anyway. Because the pipeline runs in <strong>windows</strong>, the dedup LRU is per-window: a replay that straddles two windows isn't caught. Replays almost always arrive close together, and the minute in the key bounds semantic duplicates — an accepted trade-off documented in the design.</p>
+    </div>
+  </details>
+
+  <details class="stage">
+    <summary>⑦ Collect → SQLite <span class="tag">terminal sink</span></summary>
+    <div class="body">
+      <p>The surviving, cleaned events are drained into the event sink and written to SQLite in one transaction per window; the window's per-stage <code>StageMetric</code>s are written to <code>stage_metrics</code> in the same flush.</p>
+      <p class="why">Why a sink, not another Map</p>
+      <p class="mb-0">Persistence is terminal — nothing flows downstream of it — and it's the boundary where the library hands off to the API's storage seam. Swapping SQLite for Postgres/ClickHouse later means changing only this sink, not the pipeline.</p>
+    </div>
+  </details>
+
+  <div class="note">
+    <strong>Recap of the "why this order":</strong> cheap privacy gate first → canonicalise so later stages can trust the data → drop unknowns before spending effort → enrich only survivors → custom scoring → de-dupe only things we'll keep → persist. Each stage assumes the guarantees established by the one before it.
+  </div>
+</section>
+
+<!-- ANIMATED JOURNEY -->
+<section id="journey">
+  <div class="section-tag">Putting It Together</div>
+  <h2>🎬 Watch one event travel the whole system</h2>
+  <p class="lead">Pick an event and press play. Follow it from the user's click, through the script and API, down the pipeline assembly line, into the database, and onto the dashboard.</p>
+
+  <div class="card flow-wrap mt-md">
+    <div class="flow-controls">
+      <button class="btn" id="playBtn">▶ Play journey</button>
+      <button class="btn ghost" id="resetBtn">↺ Reset</button>
+      <label class="compact muted">Event:
+        <select id="eventSelect" class="control-select">
+          <option value="Purchase">Purchase ($42) — happy path</option>
+          <option value="PageView">PageView — happy path</option>
+          <option value="noconsent">Click (no consent) — dropped early</option>
+          <option value="unknown">"SuperLike" — unknown type, dropped</option>
+          <option value="duplicate">Duplicate Purchase — deduped</option>
+        </select>
+      </label>
+    </div>
+    <div class="stage-status" id="status">Ready. Press play to send an event on its journey.</div>
+
+    <div class="pipeline-viz">
+      <div class="rail">
+        <div class="packet" id="packet">📦</div>
+      </div>
+      <div class="pipeline-track" id="track"></div>
+    </div>
+
+    <div class="log" id="log"></div>
+  </div>
+
+  <div class="steps mt-xl">
+    <div class="step"><div class="num"></div><div><h4>Browser: the action happens</h4><p>User clicks "Buy". The script builds an event with timestamp, URL, user agent, session id and properties — then batches it.</p></div></div>
+    <div class="step"><div class="num"></div><div><h4>Script → API: a non-blocking send</h4><p><code class="inline">sendBeacon</code>/<code class="inline">fetch</code> POSTs the batch to <code class="inline">/api/events</code>. The UI never waits.</p></div></div>
+    <div class="step"><div class="num"></div><div><h4>API handler: stamp &amp; queue</h4><p>Server adds the real IP + received-at time, drops the event on a bounded channel, replies <code class="inline">202</code> instantly.</p></div></div>
+    <div class="step"><div class="num"></div><div><h4>Worker: the pipeline window</h4><p>The background worker runs the batch through the 7-stage pipeline — cleaning, filtering, enriching, deduping.</p></div></div>
+    <div class="step"><div class="num"></div><div><h4>SQLite: persist results + metrics</h4><p>Cleaned events go to the <code class="inline">events</code> table; per-stage stats go to <code class="inline">stage_metrics</code>.</p></div></div>
+    <div class="step"><div class="num"></div><div><h4>Dashboard: live charts</h4><p>The shop's dashboard calls <code class="inline">GET /api/stats</code> and renders counts, capture time, and per-stage rollups.</p></div></div>
+  </div>
+</section>
+
+<!-- WHY -->
+<section id="why">
+  <div class="section-tag">Design Reasoning</div>
+  <h2>Why it's built this way (in plain terms)</h2>
+  <div class="grid grid-2 mt-md">
+    <div class="card"><h3>Tracking can't break the shop</h3><p class="muted">Every tracker call is wrapped in try/catch, sends are non-blocking, and the server drops on overload instead of stalling. A broken analytics backend must never cost a sale.</p></div>
+    <div class="card"><h3>Don't trust the client</h3><p class="muted">IP, geo and receipt time are added server-side. Consent is checked both in the browser and again as the very first pipeline stage.</p></div>
+    <div class="card"><h3>One library, two callers</h3><p class="muted">The same pipeline runs inside the API and in standalone benchmarks. That keeps the "real" code path the thing that's measured and tested.</p></div>
+    <div class="card"><h3>Live metrics, bounded memory</h3><p class="muted">Windowed runs flush per-stage metrics every fraction of a second while keeping at most one window of events in flight — fast feedback without runaway memory.</p></div>
+  </div>
+</section>
+
+<footer>
+  <p>Mable Tracking System — plain-English architecture walkthrough.<br/>
+  Components: <code class="inline">ecom/</code> (website) · <code class="inline">scripts/tracker.js</code> (script) · <code class="inline">api/</code> (Go API) · <code class="inline">pipeline/</code> (library). This is a standalone explainer; open it directly in any browser.</p>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  // Meet the Cast: staggered settle-in when the section enters the viewport.
+  var castGrid = document.querySelector("#pieces .grid-4");
+  if (castGrid && "IntersectionObserver" in window) {
+    var castObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          castGrid.classList.add("cast-animate");
+          castObserver.disconnect();
+        }
+      });
+    }, { threshold: 0.2, rootMargin: "0px 0px -50px 0px" });
+    castObserver.observe(castGrid);
+  } else if (castGrid) {
+    castGrid.classList.add("cast-animate");
+  }
+
+  // Stage definitions for the animated assembly line.
+  var STAGES = [
+    { key: "browser",  label: "Browser",   title: "User action",   desc: "click / view / buy" },
+    { key: "script",   label: "Script",    title: "tracker.js",    desc: "build + batch event" },
+    { key: "api",      label: "Go API",    title: "POST /events",  desc: "stamp IP+time · 202" },
+    { key: "consent",  label: "Stage 1",   title: "Filter consent",desc: "needs consent:true" },
+    { key: "normalize",label: "Stage 2",   title: "Map normalize", desc: "clean + canonicalise" },
+    { key: "tracked",  label: "Stage 3",   title: "Filter tracked",desc: "known type only" },
+    { key: "geo",      label: "Stage 4",   title: "Enrich geo",    desc: "geo · device · tz" },
+    { key: "churn",    label: "Stage 5",   title: "ChurnEnrich",   desc: "score purchases" },
+    { key: "dedup",    label: "Stage 6",   title: "Deduplicate",   desc: "drop repeats" },
+    { key: "db",       label: "Sink",      title: "SQLite",        desc: "persist + metrics" },
+    { key: "dash",     label: "Dashboard", title: "GET /stats",    desc: "live charts" }
+  ];
+
+  var track = document.getElementById("track");
+  var packet = document.getElementById("packet");
+  var logEl = document.getElementById("log");
+  var statusEl = document.getElementById("status");
+  var playBtn = document.getElementById("playBtn");
+  var resetBtn = document.getElementById("resetBtn");
+  var select = document.getElementById("eventSelect");
+
+  // Build the visual nodes.
+  var nodeEls = [];
+  STAGES.forEach(function (s, i) {
+    var n = document.createElement("div");
+    n.className = "node";
+    n.dataset.key = s.key;
+    var num = (i >= 3 && i <= 8) ? '<div class="stage-num">' + (i - 2) + '</div>' : '';
+    n.innerHTML = num +
+      '<div class="nlabel">' + s.label + '</div>' +
+      '<div class="ntitle">' + s.title + '</div>' +
+      '<div class="ndesc">' + s.desc + '</div>';
+    track.appendChild(n);
+    nodeEls.push(n);
+  });
+
+  var running = false;
+  var timers = [];
+
+  function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+  function resetViz() {
+    clearTimers();
+    running = false;
+    nodeEls.forEach(function (n) { n.classList.remove("active", "dropped"); });
+    packet.classList.remove("dropped");
+    packet.style.left = "0px";
+    packet.style.opacity = "1";
+    packet.textContent = emojiFor(select.value);
+    logEl.innerHTML = "";
+    statusEl.textContent = "Ready. Press play to send an event on its journey.";
+  }
+
+  function emojiFor(kind) {
+    if (kind === "PageView") return "👁️";
+    if (kind === "noconsent") return "🚫";
+    if (kind === "unknown") return "❓";
+    if (kind === "duplicate") return "📦";
+    return "💳";
+  }
+
+  function logLine(text, cls) {
+    var div = document.createElement("div");
+    div.className = "line";
+    var time = new Date().toLocaleTimeString();
+    div.innerHTML = '<span class="t">' + time + '</span>  <span class="' + (cls || "") + '">' + text + '</span>';
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // Where does this event get dropped (index into STAGES), or -1 if it survives.
+  function dropIndexFor(kind) {
+    if (kind === "noconsent") return 3;  // consent filter
+    if (kind === "unknown")   return 5;  // tracked filter
+    if (kind === "duplicate") return 8;  // dedup
+    return -1;
+  }
+
+  function movePacketTo(i) {
+    var node = nodeEls[i];
+    var rail = packet.parentElement;
+    var railRect = rail.getBoundingClientRect();
+    var nodeRect = node.getBoundingClientRect();
+    var x = (nodeRect.left + nodeRect.width / 2) - railRect.left - 17;
+    packet.style.left = x + "px";
+  }
+
+  var MESSAGES = [
+    function (k) { return ["User performs <b>" + niceName(k) + "</b> in the browser.", "info"]; },
+    function (k) { return ["Script builds the event (URL, UA, session, props) and batches it.", ""]; },
+    function (k) { return ["POST /api/events → server stamps real IP + received-at, replies <b>202</b>.", "ok"]; },
+    function (k) { return k === "noconsent"
+        ? ["Stage 1 <b>consent</b>: no consent flag → <b>DROPPED</b>. Nothing is stored.", "warn"]
+        : ["Stage 1 <b>consent</b>: consent:true ✓ passes.", ""]; },
+    function (k) { return ["Stage 2 <b>normalize</b>: trimmed text, event_type canonicalised, timestamp defaulted.", ""]; },
+    function (k) { return k === "unknown"
+        ? ["Stage 3 <b>tracked</b>: \"SuperLike\" is not a known type → <b>DROPPED</b> (counted).", "warn"]
+        : ["Stage 3 <b>tracked</b>: known event type ✓ passes.", ""]; },
+    function (k) { return ["Stage 4 <b>enrich_geo</b>: added country/timezone from IP, device/browser from UA.", ""]; },
+    function (k) { return k === "Purchase" || k === "duplicate"
+        ? ["Stage 5 <b>ChurnEnrich</b>: Purchase → churn-probability score attached.", ""]
+        : ["Stage 5 <b>ChurnEnrich</b>: non-purchase → passes through unchanged.", ""]; },
+    function (k) { return k === "duplicate"
+        ? ["Stage 6 <b>dedup</b>: same session|type|minute seen already → <b>DROPPED</b>.", "warn"]
+        : ["Stage 6 <b>dedup</b>: first time for this key ✓ passes.", ""]; },
+    function (k) { return ["<b>SQLite</b>: cleaned event written to <code>events</code>; per-stage stats → <code>stage_metrics</code>.", "ok"]; },
+    function (k) { return ["<b>Dashboard</b> calls GET /api/stats → live charts update. 🎉", "ok"]; }
+  ];
+
+  function niceName(k) {
+    if (k === "noconsent") return "Click";
+    if (k === "unknown") return "SuperLike";
+    if (k === "duplicate") return "Purchase (repeat)";
+    return k;
+  }
+
+  function play() {
+    if (running) return;
+    resetViz();
+    running = true;
+    var kind = select.value;
+    var dropAt = dropIndexFor(kind);
+    packet.textContent = emojiFor(kind);
+    var step = 0;
+    var delay = 1050;
+
+    function doStep() {
+      if (step >= STAGES.length) {
+        running = false;
+        statusEl.textContent = "Done — event persisted and shown on the dashboard.";
+        return;
+      }
+      // highlight + move
+      nodeEls.forEach(function (n) { n.classList.remove("active"); });
+      var node = nodeEls[step];
+      node.classList.add("active");
+      movePacketTo(step);
+
+      var msg = MESSAGES[step](kind);
+      logLine(msg[0], msg[1]);
+      statusEl.textContent = STAGES[step].label + " · " + STAGES[step].title;
+
+      if (dropAt === step) {
+        // drop animation: mark node, drop packet, stop.
+        node.classList.add("dropped");
+        timers.push(setTimeout(function () {
+          packet.classList.add("dropped");
+          statusEl.textContent = "Event dropped at " + STAGES[step].title + " — never reaches the database.";
+          running = false;
+        }, 500));
+        return;
+      }
+
+      step++;
+      timers.push(setTimeout(doStep, delay));
+    }
+
+    // small head start so the move transition is visible
+    timers.push(setTimeout(doStep, 200));
+  }
+
+  playBtn.addEventListener("click", play);
+  resetBtn.addEventListener("click", resetViz);
+  select.addEventListener("change", resetViz);
+  window.addEventListener("resize", function () {
+    // keep packet aligned if user resizes mid/after run
+    var active = track.querySelector(".node.active");
+    if (active) movePacketTo(nodeEls.indexOf(active));
+  });
+
+  // init
+  resetViz();
+})();
+</script>
+<!-- impeccable-live-start -->
+<script src="http://localhost:8400/live.js"></script>
+<!-- impeccable-live-end -->
+</body>
+</html>

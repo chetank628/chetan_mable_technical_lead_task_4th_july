@@ -1,0 +1,859 @@
+---
+title: "System Design Decisions"
+description: "The architectural choices that shape the Mable tracking pipeline, why they were made, and what alternatives were rejected."
+kind: plan
+localOnly: true
+---
+
+## Objective
+
+This document is a decision record for the whole Mable demo system. It explains the architectural choices that matter from a system-design perspective, the alternatives that were considered, and the trade-offs that were accepted. It is meant to answer the question: *"Why was this done this way, and what else could have been done?"*
+
+The scope covers the four code modules — `ecom/`, `scripts/tracker.js`, `api/`, and `pipeline/` — and the integration points between them.
+
+## What this document covers
+
+- The pipeline library's typing, concurrency, and sink models.
+- The API's windowed ingest architecture, storage choice, and auth model.
+- The frontend's SPA shape, state strategy, and tracker integration.
+- The tracker script's transport, batching, and consent model.
+- Cross-cutting concerns: back-pressure, error handling, and the browser-vs-server split.
+
+## What this document does not cover
+
+- Day-to-day implementation details (see `api/api-design.md`, `pipeline/README.md`, and `ecom/README.md`).
+- Deployment playbooks or infrastructure sizing.
+- Performance benchmark methodology (see `pipeline/bench_test.go`).
+
+## Big picture: the system under discussion
+
+<Diagram id="system-context" caption="The four modules and the decision surfaces between them. Each boundary is a place where a different choice could have been made.">
+
+```html
+<div class="diagram-panel" data-rough>
+  <div class="diagram-card">
+    <div class="diagram-node">Ecom SPA</div>
+    <div class="diagram-muted">Remix SPA + Zustand</div>
+  </div>
+  <div class="diagram-pill">↔</div>
+  <div class="diagram-card">
+    <div class="diagram-node">Tracker</div>
+    <div class="diagram-muted">vanilla JS beacon</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-card">
+    <div class="diagram-node">Go API</div>
+    <div class="diagram-muted">Gin + SQLite</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-card">
+    <div class="diagram-node">Pipeline</div>
+    <div class="diagram-muted">generic Go library</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-card">
+    <div class="diagram-node">SQLite</div>
+    <div class="diagram-muted">events + metrics</div>
+  </div>
+</div>
+```
+
+```css
+.diagram-panel { display: flex; align-items: center; gap: 8px; padding: 16px; flex-wrap: wrap; justify-content: center; }
+.diagram-card { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 90px; }
+.diagram-node { padding: 8px 12px; border: 2px solid var(--wf-ink); border-radius: var(--wf-radius); background: var(--wf-card); white-space: nowrap; }
+.diagram-muted { font-size: 12px; color: var(--wf-muted); }
+.diagram-pill { font-size: 18px; color: var(--wf-accent); }
+```
+
+</Diagram>
+
+The numbered sections below walk through each major decision surface in roughly dependency order: pipeline first, then the API that consumes it, then the frontend and tracker that feed it.
+
+---
+
+## Decision 1: Homogeneous typing for the pipeline (`Pipeline[T]`)
+
+### The choice
+
+The pipeline is generic over a single element type `T`. Every stage receives `[]T` and emits `[]T`. The only place a second type appears is in the terminal `Reduce[T, K, R]` sink.
+
+### Why this was chosen
+
+- **Compile-time safety.** A `Map` cannot silently change the element type and break downstream callers. The type checker catches stage mismatches at build time.
+- **Allocation-free hot path.** Because `T` never changes, the runtime can move batches of the same concrete type through channels without boxing or interface conversion in the common case.
+- **Simple mental model.** A pipeline is a chain of transforms on one kind of thing. The brief explicitly asks for `Pipeline[T]` and asks the designer to justify the typing model.
+
+### Alternatives considered and rejected
+
+**Alternative A: Type-erasure at stage boundaries (`Pipeline` over `any`)**
+
+A fully dynamic pipeline would let each stage emit a different type. That is attractive for "ETL-shaped" workflows where one stage parses a raw string into a struct and another aggregates.
+
+Rejected because:
+- Every batch would be boxed as `[]any`, adding an allocation and an interface conversion per element.
+- The brief requires a `Pipeline[T]` that is generic over a single element type; type erasure would not satisfy the requirement.
+- Downstream stages would need type assertions, which push errors from compile time to runtime.
+
+**Alternative B: Heterogeneous typed stages with typed edges (`Pipeline[A, B, C, ...]`)**
+
+A pipeline could be a sequence of typed stages where each stage has its own input and output type, e.g., `Stage[A, B]` followed by `Stage[B, C]`.
+
+Rejected because:
+- The builder DSL becomes unwieldy for long chains and makes it hard to compose or reuse sub-pipelines.
+- It complicates the fan-out worker model: each stage edge is a different channel type, so the runtime cannot reuse the same batching/dispatch code generically without heavy reflection or code generation.
+- The brief asked for a single `T` generic, not a variadic chain of types.
+
+### Trade-off accepted
+
+When the pipeline genuinely needs to carry different shapes, the caller must model them as variants inside `T`. For the API, `pipeline.Event` carries all event fields plus a `Properties` map, so enrichment and filtering can stay within `Event`. This is slightly less ergonomic than changing `T` mid-pipeline, but it keeps the runtime fast and the type system honest.
+
+<AnnotatedCode
+  id="typing-model-code"
+  filename="pipeline/pipeline.go"
+  language="go"
+  code={"// Pipeline is a generic streaming pipeline over element type T. Build it with\n// New and the fluent stage methods, then terminate it with Collect or Reduce.\ntype Pipeline[T any] struct {\n\tcfg    Config\n\tstages []Stage[T]\n\tmu      sync.Mutex\n\tmetrics []StageMetric\n}\n\n// Map appends a stage that transforms each T into a T.\nfunc (p *Pipeline[T]) Map(name string, fn func(T) T) *Pipeline[T] {\n\treturn p.Stage(mapStage[T]{name: name, fn: fn})\n}\n\n// Reduce introduces the second and third type parameters, so it is a package\n// function rather than a method on Pipeline[T].\nfunc Reduce[T any, K comparable, R any](\n\tctx context.Context,\n\tp *Pipeline[T],\n\tsource <-chan T,\n\tkey func(T) K,\n\tinit func() R,\n\treduce func(acc R, v T) R,\n) (map[K]R, []StageMetric, error) {"}
+  annotations={[
+    {
+      lines: "2-7",
+      label: "Single T",
+      note: "All stages share the same element type."
+    },
+    {
+      lines: "15-23",
+      label: "Reduce is the exception",
+      note: "K and R only appear at the terminal sink, which is where the type genuinely changes."
+    }
+  ]}
+/>
+
+---
+
+## Decision 2: Bounded channels + worker pools for concurrency
+
+### The choice
+
+Elements move between stages through bounded channels in dynamically-sized batches. Each stage fans out across a pool of worker goroutines. The default worker count is `runtime.NumCPU()`, the default channel buffer is 8 batches, and the default batch size is 256 elements.
+
+### Why this was chosen
+
+- **Intrinsic back-pressure.** Because every inter-stage channel is bounded, a slow downstream stage naturally blocks upstream workers. No explicit rate limiter or token bucket is needed.
+- **Bounded memory.** The worst-case in-flight memory is roughly `buffer_depth * batch_size * stage_count` elements, which is easy to reason about and tune.
+- **CPU-friendly batching.** Handing batches of 256 elements to a worker amortizes goroutine scheduling and channel send/recv overhead.
+- **Simple to tune.** Batch size, worker count, and buffer depth are all functional options.
+
+### Alternatives considered and rejected
+
+**Alternative A: Unbounded channels and queues between stages**
+
+Unbounded channels would remove the risk of blocking upstream stages.
+
+Rejected because:
+- Memory is no longer bounded under a sustained overload. A slow sink could cause an OOM.
+- It hides back-pressure. The system would silently buffer more and more data rather than shedding or slowing down.
+- The brief explicitly calls for bounded memory and back-pressure behavior.
+
+**Alternative B: Single goroutine per stage (no fan-out)**
+
+Each stage could run on exactly one goroutine that processes one element at a time.
+
+Rejected because:
+- It would leave most CPU cores idle when the workload is CPU-bound.
+- It serializes the whole pipeline, making throughput roughly equal to the slowest stage's element latency.
+- The brief requires dynamic batching and fan-out across worker goroutines.
+
+**Alternative C: Lock-free ring buffers (e.g., disruptor-style)**
+
+A lock-free ring buffer between stages can be extremely fast for low-latency pipelines.
+
+Rejected because:
+- It adds significant implementation complexity (power-of-two sizing, cache-line padding, sequencer coordination).
+- The gains are most visible in ultra-low-latency finance pipelines, not in batch-oriented analytics where 5ms batch timeouts are acceptable.
+- Go channels already provide the right abstraction with bounded capacity and scheduler integration.
+
+### Trade-off accepted
+
+Ordering is not preserved across a stage's fan-out workers. If the order of events matters, the caller must design stages to be order-independent (e.g., keyed aggregation) or accept approximate ordering. For analytics tracking, order is irrelevant except for deduplication, which is handled by a separate stage with its own synchronization.
+
+<Diagram id="concurrency-model" caption="Bounded channels between worker pools. The sink is single-threaded so accumulators need no locks.">
+
+```html
+<div class="diagram-stack" data-rough>
+  <div class="diagram-row">
+    <div class="diagram-card"><div class="diagram-node">Source</div><div class="diagram-muted">chan T</div></div>
+    <div class="diagram-arrow">→</div>
+    <div class="diagram-card"><div class="diagram-node">Batcher</div><div class="diagram-muted">1 goroutine</div></div>
+    <div class="diagram-arrow">→</div>
+    <div class="diagram-card"><div class="diagram-node">Stage 1</div><div class="diagram-muted">N workers</div></div>
+    <div class="diagram-arrow">→</div>
+    <div class="diagram-card"><div class="diagram-node">Stage 2</div><div class="diagram-muted">N workers</div></div>
+    <div class="diagram-arrow">→</div>
+    <div class="diagram-card"><div class="diagram-node">Sink</div><div class="diagram-muted">1 goroutine</div></div>
+  </div>
+</div>
+```
+
+```css
+.diagram-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
+.diagram-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.diagram-card { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 70px; }
+.diagram-node { padding: 8px 12px; border: 2px solid var(--wf-ink); border-radius: var(--wf-radius); background: var(--wf-card); white-space: nowrap; }
+.diagram-muted { font-size: 12px; color: var(--wf-muted); }
+.diagram-arrow { font-size: 18px; color: var(--wf-accent); }
+```
+
+</Diagram>
+
+---
+
+## Decision 3: Global `Reduce` sink, not chainable into further `T` stages
+
+### The choice
+
+`Reduce[T, K, R]` is a terminal package function, not a method on `Pipeline[T]`. It folds the entire stream into a keyed `map[K]R` and is global across all batches, not per-batch.
+
+### Why this was chosen
+
+- **Type honesty.** Changing `T` to `K`/`R` is a terminal operation; the pipeline cannot pretend to continue as `T` after it has become a different type.
+- **Global aggregation is correct for analytics.** Counts, sums, and averages are only meaningful when computed over the complete stream, not over arbitrary batch boundaries.
+- **Race-free accumulator.** The sink is drained on a single goroutine, so the accumulator map needs no locks.
+
+### Alternatives considered and rejected
+
+**Alternative A: Per-batch reduce and a downstream merge stage**
+
+A reduce could fold each batch independently and emit partial `R` values to be merged later.
+
+Rejected because:
+- It complicates the API for the common case. Most users want a final aggregate, not intermediate partials.
+- It requires the caller to provide a merge operation in addition to the fold operation.
+- For the tracking use case, partial counts per batch are not useful; the dashboard needs totals over the whole time range.
+
+**Alternative B: Make `Reduce` a chainable method returning `Pipeline[R]`**
+
+The pipeline could continue after a reduce with `R` as the new element type.
+
+Rejected because:
+- It breaks the homogeneous `T` model and forces the runtime to handle type-changing stages throughout the chain.
+- It is rarely needed in practice. The terminal sink is a cleaner boundary.
+
+### Trade-off accepted
+
+`Reduce` is not suitable for streaming aggregates that must be emitted continuously (e.g., a sliding window of the last minute). For that use case, the library provides `Collect` into a caller-provided sink. The API uses `Collect` and computes time-bucketed analytics in SQL, which is the right tool for arbitrary-range queries.
+
+---
+
+## Decision 4: Windowed pipeline runs in the API
+
+### The choice
+
+The API does not run one perpetual pipeline. Instead, one background worker drains a bounded ingest channel into discrete windows that close at `WINDOW_MAX_EVENTS` (2048) or `WINDOW_DURATION` (500ms), whichever comes first. Each window runs its own fresh `Pipeline[Event]`, and the surviving events plus per-stage metrics are flushed when the window ends.
+
+### Why this was chosen
+
+- **Per-stage metrics must be observable while the service runs.** The library flushes `[]StageMetric` only once per `execute()` call. A single perpetual run would only emit metrics at shutdown, failing the brief's requirement.
+- **Bounded memory.** At most one window's events are in flight at any time.
+- **Natural back-pressure.** The ingest channel is bounded; if the pipeline is slow, `Submit` drops and counts rather than blocking HTTP handlers.
+- **Graceful shutdown is simple.** Closing the channel ends the current window, and the worker flushes the final window before exiting.
+
+### Alternatives considered and rejected
+
+**Alternative A: One perpetual pipeline run**
+
+The worker could feed the ingest channel directly into a single `Pipeline[Event]` that never terminates.
+
+Rejected because:
+- Per-stage metrics would never reach the database until the service shuts down, which defeats the observability requirement.
+- A single run makes it harder to recover from a pipeline error without restarting the whole process.
+- Memory would grow unbounded if the sink is slower than the source.
+
+**Alternative B: One pipeline run per HTTP request**
+
+Each `POST /api/events` could build a pipeline and run the batch synchronously.
+
+Rejected because:
+- It destroys batching economics. Most tracker beacons contain only a few events, so each run would pay the full pipeline setup cost for a tiny batch.
+- It resets stateful stages (like the deduplication LRU) on every request, eliminating cross-request deduplication.
+- It adds goroutine churn under load and increases lock contention on the database.
+
+### Trade-off accepted
+
+The deduplication LRU is scoped to one window, so a duplicate that straddles two windows is not dropped. The window bounds and the dedup key (session + type + minute) make this a rare edge case in practice. Cross-window global deduplication would require shared state and a larger memory footprint, which is not justified for a take-home demo.
+
+<AnnotatedCode
+  id="windowed-worker-code"
+  filename="api/internal/ingest/worker.go"
+  language="go"
+  code={"// runWindow executes exactly one bounded pipeline run. It returns false when the\n// ingest stream is finished.\nfunc (w *Worker) runWindow(ctx context.Context) bool {\n\tsource := make(chan pipeline.Event)\n\tsink := &eventSink{}\n\tp := buildPipeline(w.cfg)\n\n\tvar metrics []pipeline.StageMetric\n\trunDone := make(chan struct{})\n\tgo func() {\n\t\tdefer close(runDone)\n\t\tmetrics, _ = p.Collect(ctx, source, sink)\n\t}()\n\n\tstart := time.Now()\n\tfinished := w.feedWindow(ctx, source)\n\t<-runDone\n\tw.flush(ctx, sink, metrics, start)\n\treturn !finished\n}\n\n// feedWindow forwards events until the window's size or time bound is hit.\nfunc (w *Worker) feedWindow(ctx context.Context, source chan<- pipeline.Event) bool {\n\tdefer close(source)\n\ttimer := time.NewTimer(w.cfg.WindowDuration)\n\tcount := 0\n\tfor {\n\t\tselect {\n\t\tcase e := <-w.ch:\n\t\t\tsource <- e\n\t\t\tcount++\n\t\t\tif count >= w.cfg.WindowMaxEvents {\n\t\t\t\treturn false\n\t\t\t}\n\t\tcase <-timer.C:\n\n\t\t\treturn false\n\t\tcase <-ctx.Done():\n\t\t\treturn true\n\t\t}\n\t}\n}"}
+  annotations={[
+    {
+      lines: "1-16",
+      label: "One window = one run",
+      note: "Each window builds a fresh pipeline, so metrics flush after every window."
+    },
+    {
+      lines: "24-37",
+      label: "Size or time bound",
+      note: "The window closes at 2048 events or 500ms, whichever comes first."
+    }
+  ]}
+/>
+
+---
+
+## Decision 5: SQLite as the analytics store
+
+### The choice
+
+The API persists events and stage metrics to SQLite in a single file, using WAL mode and a single writer connection. The driver is `modernc.org/sqlite`, which is CGO-free.
+
+### Why this was chosen
+
+- **Zero infrastructure.** A single file needs no separate server or container, which is ideal for a take-home demo and for local development.
+- **WAL mode gives concurrent reads.** Read-only stats queries can run while the single-goroutine ingest writer is active.
+- **CGO-free build.** The `modernc.org/sqlite` driver lets the binary build and test anywhere without a C toolchain.
+- **Good enough for the scale.** The demo caps benchmarks at 1M events and the API is not intended for production-scale analytics ingestion.
+
+### Alternatives considered and rejected
+
+**Alternative A: ClickHouse (the suggested analytics database)**
+
+ClickHouse is the right destination for real analytics scale and is explicitly mentioned in the brief.
+
+Rejected because:
+- Running a ClickHouse container adds operational complexity to a demo that must be runnable in a few minutes.
+- The brief states the stack is a suggestion, not a mandate, and prioritizes correctness and clear design over optional items.
+- The `store` package is designed as a thin seam; swapping SQLite for ClickHouse is the documented scaling path.
+
+**Alternative B: PostgreSQL**
+
+Postgres is a familiar, robust choice for relational data and has good JSON support for the `properties` field.
+
+Rejected because:
+- It still requires a running server or a Docker container, which is heavier than a single file for a demo.
+- For the analytics aggregations in the brief, Postgres row-oriented storage is not materially better than SQLite at this scale.
+
+**Alternative C: In-memory only with periodic snapshot to disk**
+
+All events could be held in memory and flushed to a file on shutdown.
+
+Rejected because:
+- It loses data on crash and makes the dashboard read only recent history.
+- The brief requires persistence and analytics over time ranges.
+
+### Trade-off accepted
+
+SQLite has a single-writer limit and lacks columnar compression, so it will become the bottleneck before the pipeline does. That is accepted as a deliberate scaling boundary: the `store.Store` interface is the seam where the backend can be replaced with ClickHouse or Postgres when volume grows.
+
+<AnnotatedCode
+  id="sqlite-store-code"
+  filename="api/internal/store/store.go"
+  language="go"
+  code={"// Open opens (creating if needed) the SQLite database at path, applies the\n// performance pragmas, and runs migrations.\nfunc Open(ctx context.Context, path string) (*Store, error) {\n\tdsn := fmt.Sprintf(\"file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)\", path)\n\tdb, err := sql.Open(\"sqlite\", dsn)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\t// A single writer connection avoids \"database is locked\" churn.\n\tdb.SetMaxOpenConns(1)\n\treturn &Store{db: db}, nil\n}"}
+  annotations={[
+    {
+      lines: "3-5",
+      label: "WAL + pragmas",
+      note: "WAL lets reads proceed while the single writer is active."
+    },
+    {
+      lines: "7-8",
+      label: "Single writer",
+      note: "The ingest path serializes writes; reads still use the pool."
+    }
+  ]}
+/>
+
+---
+
+## Decision 6: JWT in an HttpOnly cookie for cross-origin SPA auth
+
+### The choice
+
+The API issues an HS256 JWT on signup/login and stores it in an `HttpOnly`, `Secure` (in prod), `SameSite=None` (in prod) cookie named `mable_session`. The frontend never reads the token; it relies on `GET /api/auth/me` to know whether a session exists.
+
+### Why this was chosen
+
+- **XSS resistance.** Because the token is `HttpOnly`, JavaScript cannot read it, so an XSS payload cannot exfiltrate the session token.
+- **Simple cross-origin credentials.** The SPA and API run on different origins in production. `SameSite=None` with `Secure` allows the cookie to be sent across sites while the browser still enforces origin boundaries.
+- **Stateless verification.** The API verifies the JWT signature locally without a database round-trip on every request.
+
+### Alternatives considered and rejected
+
+**Alternative A: Store JWT in `localStorage` and send it as a Bearer header**
+
+This is the most common SPA pattern and is easy to implement with `fetch` headers.
+
+Rejected because:
+- It exposes the token to any XSS vulnerability. The brief explicitly says not to store sensitive auth state in client-accessible storage.
+- It requires every request to manually attach the `Authorization` header.
+- The brief specifically requests an `HttpOnly` cookie.
+
+**Alternative B: Server-side sessions stored in a session store (Redis/DB)**
+
+The API could store a session ID in a cookie and look up the session in Redis or the database on every request.
+
+Rejected because:
+- It adds an external dependency (Redis) for a demo that already chose SQLite for zero-infra operation.
+- It adds a database round-trip to every authenticated request.
+- JWT is sufficient for the stateless session model the brief describes.
+
+### Trade-off accepted
+
+Token revocation is harder with JWTs than with server-side sessions. If a user's session needs to be invalidated before the JWT expires, the API would need a token blocklist or shorter TTLs. The current TTL is 24 hours, which is acceptable for a demo; a production system would add a refresh-token rotation or a revocation list.
+
+---
+
+## Decision 7: Exact-origin CORS with credentials
+
+### The choice
+
+CORS is configured to allow exactly one origin (`CORS_ORIGIN` env var, default `http://localhost:5173`) with `Allow-Credentials: true`. Wildcard `*` with credentials is rejected at config load in production.
+
+### Why this was chosen
+
+- **Security.** Allowing any origin to send credentialed requests would let arbitrary websites call the API on behalf of a logged-in user.
+- **Browser correctness.** Browsers reject `Access-Control-Allow-Origin: *` when `credentials: include` is used anyway; the API's validation makes the failure explicit at boot time.
+- **Predictability.** The exact-origin model is easy to document and audit.
+
+### Alternatives considered and rejected
+
+**Alternative A: Wildcard origin with credentials**
+
+This would allow the tracker script to be embedded on any site without configuring each origin.
+
+Rejected because:
+- Browsers refuse it for credentialed requests.
+- It would let any third-party site invoke authenticated endpoints on the API with the user's cookie.
+
+**Alternative B: Maintain an allow-list of origins in the database**
+
+A multi-tenant tracker service might store per-account origins in a database.
+
+Rejected because:
+- It adds unnecessary complexity for a single-tenant demo.
+- The brief does not require multi-tenant origin management.
+
+### Trade-off accepted
+
+Deploying the SPA on a new origin requires updating `CORS_ORIGIN`. This is acceptable because the demo has one known frontend origin. A production system with many customer sites would move to an allow-list stored in configuration or a database.
+
+---
+
+## Decision 8: Remix SPA mode with a separate API backend
+
+### The choice
+
+The frontend is a React Router 7 (Remix) SPA built with Vite, running on `http://localhost:5173`. It communicates with the Go API on `http://localhost:8080`. The server-side rendering mode is disabled (`ssr: false`).
+
+### Why this was chosen
+
+- **Familiarity with the suggested stack.** The brief suggests React Router 7 (Remix) in SPA mode, Vite, and React 19.
+- **Clear separation of concerns.** The SPA handles UI and state; the API handles auth, ingestion, and analytics. The SPA does not need a Node server for data fetching.
+- **Simple deployment path.** A SPA build is a static bundle that can be served from Cloudflare Pages or any static host, independent of the Go API.
+
+### Alternatives considered and rejected
+
+**Alternative A: Remix with full SSR and server loaders**
+
+Remix can run server-side loaders that fetch data before rendering the page.
+
+Rejected because:
+- The brief explicitly says "Single Page Application" for the e-commerce demo.
+- SSR would require a Node server or a compatible edge runtime, complicating the deployment story.
+- The API is written in Go; running Remix server-side would require either a separate Node server or complex proxying.
+
+**Alternative B: A plain React app without a framework router**
+
+A plain React SPA with `react-router-dom` and a custom Vite setup is possible.
+
+Rejected because:
+- React Router 7's framework mode provides file-based routing, typegen, and built-in error boundaries, which reduce boilerplate.
+- The brief suggests React Router 7 (Remix) specifically.
+
+### Trade-off accepted
+
+Initial page loads do not benefit from server-rendered HTML, and SEO is not a goal for a demo e-commerce app. The SPA relies on client-side JavaScript, which is acceptable for this use case.
+
+---
+
+## Decision 9: Zustand for frontend state, with persistence for cart and consent
+
+### The choice
+
+The frontend uses Zustand for state. The auth store is in-memory, the cart store is persisted to `localStorage`, and the UI store persists only the consent flag.
+
+### Why this was chosen
+
+- **Lightweight.** Zustand has minimal boilerplate compared to Redux or Context-based solutions.
+- **Persistence is opt-in.** The `persist` middleware lets each store decide what should survive a page reload.
+- **Cart is auth-independent.** Persisting the cart to `localStorage` means it survives login, logout, and session expiry, which is a deliberate UX requirement.
+
+### Alternatives considered and rejected
+
+**Alternative A: Redux Toolkit with RTK Query**
+
+Redux Toolkit is a robust, scalable choice with built-in data fetching and caching.
+
+Rejected because:
+- It adds more boilerplate and concepts (slices, thunks, RTK Query) than the demo needs.
+- The data fetching needs are simple: a few `fetch` calls and a DummyJSON catalog endpoint. RTK Query's caching would be underutilized.
+
+**Alternative B: React Context for global state**
+
+Context could hold auth, cart, and UI state without an external library.
+
+Rejected because:
+- Context causes re-renders across the tree whenever any value changes, which becomes painful as the app grows.
+- Zustand's selector-based subscriptions avoid this and are only marginally more complex.
+
+**Alternative C: Persist the JWT or user identity in `localStorage`**
+
+The auth store could persist the user object or token so the session survives refresh.
+
+Rejected because:
+- The JWT must not be stored in client-accessible storage (see Decision 6).
+- Session restoration is handled by `GET /api/auth/me` using the `HttpOnly` cookie, not by local storage.
+
+### Trade-off accepted
+
+Zustand stores are global singletons. In a larger app with strict code ownership, splitting stores by feature domain and adding middleware for logging/telemetry would be needed. The current structure is intentionally simple for three stores and a handful of routes.
+
+<AnnotatedCode
+  id="zustand-cart-code"
+  filename="ecom/app/stores/cartStore.ts"
+  language="ts"
+  code={"// Cart store: persisted to localStorage (NOT tied to auth, so it survives login,\n// logout, refresh, and session expiry).\nexport const useCartStore = create<CartState>()(\n\tpersist(\n\t\t(set, get) => ({\n\t\t\titems: [],\n\t\t\taddItem(product, quantity = 1) {\n\t\t\t\tset((state) => {\n\t\t\t\t\tconst existing = state.items.find((i) => i.id === product.id);\n\t\t\t\t\tif (existing) {\n\t\t\t\t\t\treturn {\n\t\t\t\t\t\t\titems: state.items.map((i) =>\n\t\t\t\t\t\t\t\ti.id === product.id\n\t\t\t\t\t\t\t\t\t? { ...i, quantity: i.quantity + quantity }\n\t\t\t\t\t\t\t\t\t: i\n\t\t\t\t\t\t\t),\n\t\t\t\t\t\t};\n\t\t\t\t\t}\n\t\t\t\t\treturn { items: [...state.items, { ...product, quantity }] };\n\t\t\t\t});\n\t\t\t},\n\t\t}),\n\t\t{ name: \"mable_cart\" }\n\t)\n);"}
+  annotations={[
+    {
+      lines: "1-2",
+      label: "Survives auth changes",
+      note: "Cart is tied to the device, not the session."
+    },
+    {
+      lines: "4-5",
+      label: "Opt-in persistence",
+      note: "Only the cart store is persisted; auth is not."
+    }
+  ]}
+/>
+
+---
+
+## Decision 10: Standalone vanilla-JS tracker script loaded by `<script src>`
+
+### The choice
+
+The tracker is a single dependency-free JavaScript file (`scripts/tracker.js`) that exposes `window.mable`. The SPA loads it from `/tracker.js` exactly as a third-party site would. A thin TypeScript wrapper (`ecom/app/lib/tracker.ts`) provides types and queues calls before the script loads.
+
+### Why this was chosen
+
+- **Framework agnostic.** Any site can embed it, not just React apps. This matches how real analytics trackers are deployed.
+- **No build step for the tracker.** It is plain JavaScript, so it can be copied to any static host and served immediately.
+- **Load-order safety.** The `window.mableDataLayer` queue lets callers push commands before the script has executed.
+- **Non-blocking.** The script self-defers work and never throws into the host UI.
+
+### Alternatives considered and rejected
+
+**Alternative A: NPM package imported by the React app**
+
+The tracker could be a TypeScript package that the SPA imports and bundles.
+
+Rejected because:
+- It would tie the tracker to the SPA build and make it harder to deploy on arbitrary sites.
+- The brief asks for a tracking script, which implies a standalone script tag rather than a library dependency.
+- It would prevent the tracker from being used by non-React sites.
+
+**Alternative B: Inline tracking code in the SPA components**
+
+Tracking calls could be written directly inside React components.
+
+Rejected because:
+- It would couple tracking logic to the React implementation, making it hard to reuse or test independently.
+- It would duplicate transport logic across the app.
+
+### Trade-off accepted
+
+The tracker is loaded as an external script, which means it is not tree-shaken or type-checked by the SPA build. The TypeScript wrapper mitigates this by providing a typed interface and queuing calls, but the runtime contract remains loose. A production system might ship both a script tag and a typed SDK.
+
+---
+
+## Decision 11: Batched, resilient tracker transport
+
+### The choice
+
+The tracker buffers events in memory and flushes them when the batch reaches 10 events, after 5 seconds, or on page hide. It uses `navigator.sendBeacon` when available (especially on unload), falling back to `fetch(..., { keepalive: true })`. Failed sends are persisted to `localStorage` and replayed on `online` or the next `init()`.
+
+### Why this was chosen
+
+- **Non-blocking.** The UI never waits for a network request. Batching reduces the number of requests and amortizes overhead.
+- **Unload safety.** `sendBeacon` and `fetch(keepalive)` allow requests to outlive the page, so events are not lost when the user closes the tab.
+- **Offline resilience.** Failed events are stored and replayed when connectivity returns.
+- **Privacy-aware.** Without consent, events are buffered locally and never transmitted. When consent is granted, the buffered events are flushed.
+
+### Alternatives considered and rejected
+
+**Alternative A: Send every event immediately with `fetch`**
+
+Each event could be sent as soon as it is recorded.
+
+Rejected because:
+- It generates many small network requests, which is inefficient and can block the main thread.
+- It offers no unload safety unless `sendBeacon` is used for every event, which is wasteful for high-frequency events.
+
+**Alternative B: WebSocket transport**
+
+A persistent WebSocket could stream events to the API in real time.
+
+Rejected because:
+- It adds connection-management complexity and is overkill for analytics beacons.
+- It does not work well with the API's request/response ingest handler and would require a separate WebSocket server.
+- Firewalls and proxies sometimes interfere with WebSockets.
+
+**Alternative C: Image beacon (`<img src>`) for every event**
+
+Traditional trackers often use a 1x1 pixel image request because it is simple and cross-domain friendly.
+
+Rejected because:
+- It limits the payload size and makes it hard to send structured JSON arrays.
+- The API expects JSON POST bodies, so an image beacon would require a separate endpoint.
+- It does not support the rich retry and offline logic the brief implies.
+
+### Trade-off accepted
+
+The retry queue is capped at 64 KB to prevent unbounded `localStorage` growth. If a user is offline for a long time, oldest events are dropped. This is a freshness-over-completeness choice consistent with analytics tracking.
+
+<AnnotatedCode
+  id="tracker-transport-code"
+  filename="scripts/tracker.js"
+  language="js"
+  code={"// Send a batch. Returns true if the transport accepted the handoff.\nfunction sendBatch(events, useBeacon) {\n\tif (!config.endpoint || !events.length) return true;\n\tvar body = JSON.stringify(events);\n\n\tif (useBeacon && navigator.sendBeacon) {\n\t\ttry {\n\t\t\tvar blob = new Blob([body], { type: \"application/json\" });\n\t\t\tvar ok = navigator.sendBeacon(config.endpoint, blob);\n\t\t\tif (ok) return true;\n\t\t} catch (e) { /* fall through to fetch */ }\n\t}\n\n\tfetch(config.endpoint, {\n\t\tmethod: \"POST\",\n\t\theaders: { \"Content-Type\": \"application/json\" },\n\t\tbody: body,\n\t\tcredentials: \"include\",\n\t\tkeepalive: true,\n\t}).then(function (res) {\n\t\tif (res.status === 413 || res.status === 400) {\n\t\t\t// Non-retryable: drop it.\n\t\t\treturn;\n\t\t}\n\t\tif (!res.ok) {\n\t\t\tenqueueRetry(events);\n\t\t}\n\t}).catch(function () {\n\t\tenqueueRetry(events);\n\t});\n\treturn true;\n}"}
+  annotations={[
+    {
+      lines: "4-10",
+      label: "Beacon first on unload",
+      note: "Fire-and-forget; survives page close."
+    },
+    {
+      lines: "18-24",
+      label: "Retryable vs non-retryable",
+      note: "400/413 are dropped; 5xx/network failures are retried."
+    }
+  ]}
+/>
+
+---
+
+## Decision 12: Browser-vs-server data split
+
+### The choice
+
+The browser collects only what it can know: user agent, URL, referrer, timezone, language, screen size, session id, and user id. The server adds the IP address, server receipt time, and derived fields (geo region, device, browser). The browser deliberately does not send IP or geo.
+
+### Why this was chosen
+
+- **Trust.** IP addresses and geo must come from the connection; a client-sent IP can be spoofed.
+- **Authoritative timing.** Server `received_at` is the authoritative ingest time, separate from the client timestamp which may be affected by clock skew.
+- **Privacy.** Keeping sensitive fields server-side makes it easier to apply retention and hashing policies in one place.
+
+### Alternatives considered and rejected
+
+**Alternative A: Let the client send its own IP and geo**
+
+The client could use a free IP geolocation service and send `ip` and `geo_country` in the event payload.
+
+Rejected because:
+- A malicious client can lie about its location.
+- It adds an external dependency and latency to the client.
+- It complicates consent handling because the client would be collecting location data.
+
+**Alternative B: Compute everything server-side from the request**
+
+The server could ignore most client fields and derive everything from the HTTP request.
+
+Rejected because:
+- The server cannot know the browser timezone, screen size, or exact client-side URL path in a SPA without the client telling it.
+- The brief explicitly asks to track user agent, timezone, screen, and cart data, which are client-side.
+
+### Trade-off accepted
+
+The client timestamp is still stored, but analytics use the server `received_at` as the authoritative time. If the client clock is wrong, the `ts` field may diverge from `received_at`, but the capture-time calculation uses the server clock.
+
+<Table
+  id="data-split-table"
+  columns={["Field", "Source", "Why"]}
+  rows={[
+    ["`user_agent`", "Browser", "Only the browser knows its own UA string."],
+    ["`language`, `timezone`, `screen`, `viewport`", "Browser", "Client-only environment."],
+    ["`url`, `referrer`", "Browser", "Current page context in a SPA."],
+    ["`session_id`", "Browser (`sessionStorage`)", "Per-tab session identifier."],
+    ["`user_id`", "Browser (via `identify()`)", "App-supplied identity."],
+    ["`timestamp`", "Browser", "Client event time; server time is authoritative."],
+    ["`ip`", "Server", "Cannot trust a client-sent IP."],
+    ["`received_at`", "Server", "Authoritative ingest time."],
+    ["`geo_region`, `device`, `browser`", "Server", "Derived from IP and UA without external calls."]
+  ]}
+/>
+
+---
+
+## Decision 13: Consent-first stage ordering in the API pipeline
+
+### The choice
+
+The production pipeline stage order is: `consent` → `normalize` → `tracked` → `enrich_geo` → `churn_enrich` → `dedup` → `collect`.
+
+### Why this was chosen
+
+- **Drop disallowed data as early as possible.** The consent filter runs first so events without consent are discarded before any enrichment or normalization work is wasted.
+- **Normalize before whitelisting.** Event type canonicalization (e.g., `purchase` → `Purchase`) happens before the `tracked` filter, so the whitelist and the custom `ChurnEnrich` stage see a single canonical form.
+- **Enrich only surviving events.** Geo and churn enrichment run after filtering, so CPU is not spent on events that will be dropped.
+- **Deduplicate last.** Deduplication is expensive (global lock) and should only run on events that will actually be persisted.
+
+### Alternatives considered and rejected
+
+**Alternative A: `tracked` filter before normalization**
+
+Whitelist first, then normalize the survivors.
+
+Rejected because:
+- Non-canonical spellings like `purchase` or `addtocart` would be dropped before normalization could fix them.
+- The custom churn stage would have to handle multiple spellings of the same event type.
+
+**Alternative B: Enrich before filtering**
+
+Run geo enrichment and churn scoring on every event, then filter.
+
+Rejected because:
+- It wastes CPU on events that will be dropped (non-consent or untracked).
+- It exposes sensitive enrichment logic to disallowed data.
+
+### Trade-off accepted
+
+The deduplication stage is scoped to one window, so cross-window duplicates are not collapsed. The stage order is otherwise strict and deterministic, making the pipeline easy to reason about and test.
+
+---
+
+## Decision 14: `SkipAndCount` error policy as default
+
+### The choice
+
+The pipeline default error policy is `SkipAndCount`: when a stage returns an error or panics, the offending batch is dropped, the error counter is incremented, and the pipeline keeps running. `FailFast` is available as an option.
+
+### Why this was chosen
+
+- **Availability over batch correctness for analytics.** One malformed event or one buggy custom stage should not stop the entire ingest stream.
+- **Resilience.** Panics in user-defined stages are recovered and counted as errors rather than crashing worker goroutines.
+- **Matches the brief.** The brief asks for per-stage error counts to be emitted and stored.
+
+### Alternatives considered and rejected
+
+**Alternative A: `FailFast` as default**
+
+The pipeline could stop on the first error.
+
+Rejected because:
+- In a streaming analytics ingest path, a single bad event would halt all tracking until the pipeline is restarted.
+- It would make the system fragile under real-world messy data.
+
+**Alternative B: Retry the failing batch**
+
+The pipeline could retry a batch a few times before dropping it.
+
+Rejected because:
+- Most stage errors are deterministic (bad input, panics, bad config). Retrying them usually wastes time.
+- It complicates the runtime and metrics: should retries count as additional batches or errors?
+
+### Trade-off accepted
+
+`SkipAndCount` can mask systemic problems. The API counters pipeline errors via `/metrics` and `stage_metrics`, so operators can still detect a rising error rate, but they must monitor it. For batch jobs where correctness is paramount, the caller can opt into `FailFast`.
+
+---
+
+## Decision 15: Use SQL, not `Reduce`, for dashboard analytics
+
+### The choice
+
+The API computes dashboard statistics (`avg_capture_ms`, `events_over_time`, `type_counts`, etc.) with SQL queries over the `events` table, not with the pipeline's `Reduce` sink.
+
+### Why this was chosen
+
+- **Arbitrary time ranges.** The dashboard can query any `[since, until]` range and granularity. `Reduce` only folds the stream it was given in a single run.
+- **Persistence.** The pipeline's `Reduce` accumulator lives in memory for one run. SQL aggregates are computed over the persisted dataset.
+- **Ad hoc exploration.** SQL makes it easy to add new stats without changing the pipeline library or the ingest path.
+
+### Alternatives considered and rejected
+
+**Alternative A: Compute aggregates in the pipeline with `Reduce` and store the results**
+
+Each windowed pipeline run could `Reduce` to counts per type and store those aggregates.
+
+Rejected because:
+- It would lose the ability to query arbitrary time ranges after the fact unless every possible granularity was pre-aggregated.
+- It mixes analytics computation with the ingest pipeline, making the pipeline harder to reason about.
+
+**Alternative B: Materialize pre-aggregated rollups at ingest time**
+
+The API could maintain counters per minute and type in memory or in a separate table.
+
+Rejected because:
+- It adds complexity to the ingest path for a benefit that SQL aggregation already provides at this scale.
+- It would require careful handling of window boundaries and duplicate events.
+
+### Trade-off accepted
+
+SQL aggregation is less efficient than a purpose-built columnar store for very large datasets. The accepted scaling path is to replace SQLite with ClickHouse or Postgres when the data volume outgrows row-oriented SQL.
+
+---
+
+## Cross-cutting summary
+
+<Table
+  id="decision-summary"
+  columns={["Decision", "Chosen", "Main alternative rejected", "Trade-off accepted"]}
+  rows={[
+    ["Pipeline typing", "Homogeneous `Pipeline[T]`", "Type-erasure over `any`", "Must model variants inside `T`"],
+    ["Concurrency", "Bounded channels + worker pools", "Unbounded queues or single goroutine", "Ordering not preserved across workers"],
+    ["Reduce", "Global terminal sink", "Per-batch or chainable reduce", "Not suitable for continuous streaming windows"],
+    ["API ingest", "Windowed pipeline runs", "Perpetual or per-request pipeline", "Dedup is per-window"],
+    ["Storage", "SQLite (WAL, single writer)", "ClickHouse / Postgres", "Single-writer limit; easy seam to swap"],
+    ["Auth", "HttpOnly cookie JWT", "Bearer token in `localStorage`", "Token revocation is harder"],
+    ["CORS", "Exact origin + credentials", "Wildcard origin", "New origins need config changes"],
+    ["Frontend", "Remix SPA mode", "SSR Remix", "No server-rendered HTML"],
+    ["State", "Zustand with selective persistence", "Redux / Context", "Global singletons need discipline at scale"],
+    ["Tracker", "Standalone vanilla JS script", "NPM package or inline code", "Loose runtime contract with SPA"],
+    ["Transport", "Batching + beacon + retry queue", "Immediate fetch or WebSocket", "Retry queue is capped"],
+    ["Data split", "Browser context + server IP/time/geo", "Client sends everything", "Client/server trust boundary is explicit"],
+    ["Stage order", "Consent → normalize → filter → enrich → dedup", "Filter before normalize", "Cross-window dedup gap"],
+    ["Errors", "`SkipAndCount` default", "`FailFast` default", "Systemic errors need monitoring"],
+    ["Analytics", "SQL over persisted events", "Pipeline `Reduce`", "Row-oriented limits at scale"]
+  ]}
+/>
+
+---
+
+## File map
+
+Key files referenced by these decisions.
+
+<FileTree
+  id="decision-file-map"
+  title="Files that embody the decisions"
+  entries={[
+    { path: "pipeline/pipeline.go", note: "Homogeneous T, batcher, worker pools, sink drain." },
+    { path: "pipeline/reduce.go", note: "Global Reduce sink and Collect interface." },
+    { path: "pipeline/stage.go", note: "Stage extension protocol and built-in stages." },
+    { path: "pipeline/config.go", note: "Bounded channel, batch, and worker options." },
+    { path: "api/internal/ingest/worker.go", note: "Windowed pipeline driver." },
+    { path: "api/internal/ingest/pipeline.go", note: "Production stage order and enrichment." },
+    { path: "api/internal/store/store.go", note: "SQLite seam with WAL and single writer." },
+    { path: "api/internal/auth/auth.go", note: "HttpOnly cookie JWT and CORS-safe config." },
+    { path: "api/internal/config/config.go", note: "Exact-origin CORS validation and env tuning." },
+    { path: "api/internal/handlers/events.go", note: "202 Accepted, non-blocking submit." },
+    { path: "ecom/app/root.tsx", note: "SPA shell loading /tracker.js as third-party script." },
+    { path: "ecom/app/lib/tracker.ts", note: "Typed wrapper and load-order queue." },
+    { path: "ecom/app/stores/cartStore.ts", note: "Zustand + localStorage persistence." },
+    { path: "scripts/tracker.js", note: "Standalone batching, beacon, retry transport." }
+  ]}
+/>
+

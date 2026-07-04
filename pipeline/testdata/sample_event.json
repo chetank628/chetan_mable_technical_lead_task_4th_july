@@ -1,0 +1,18 @@
+{
+  "event_type": "Purchase",
+  "user_id": "u_8f3a1c92",
+  "session_id": "s_2b7e44d1",
+  "timestamp": "2026-06-26T14:32:08.512Z",
+  "url": "https://shop.mable.ai/checkout/success",
+  "referrer": "https://shop.mable.ai/cart",
+  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+  "ip": "203.0.113.42",
+  "amount": 129.99,
+  "currency": "USD",
+  "properties": {
+    "order_id": "ord_5512aa",
+    "item_count": "3",
+    "payment_method": "card",
+    "coupon": "WELCOME10"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "source": "agent-native",
+  "appSkillId": "visual-plans",
+  "displayName": "Agent-Native Plan",
+  "skillName": "visual-plan",
+  "contentHash": "6d7663139654b4bb",
+  "mcpUrl": "",
+  "installedAt": "2026-07-02T12:43:43.638Z",
+  "installCommand": "npx @agent-native/core@latest skills add visual-plan",
+  "updateCommand": "npx @agent-native/core@latest skills update visual-plan",
+  "planMode": "local-files"
+}

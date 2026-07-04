@@ -1,0 +1,496 @@
+---
+title: "End-to-End Mable Tracking System"
+description: "How the e-commerce SPA, tracking script, Go API, and pipeline library integrate to capture, clean, and visualize user events."
+kind: plan
+localOnly: true
+---
+
+## Objective
+
+This document is a complete, plain-English walkthrough of the four pieces of the Mable tracking system and how they talk to one another. It is meant for anyone who needs to understand the whole flow — frontend, backend, library, and datastore — without opening every file.
+
+## What it covers
+
+- The role of each piece: `ecom/`, `scripts/tracker.js`, `api/`, and `pipeline/`.
+- The concrete journey of one event — a **Purchase** — from the user's click to the live dashboard.
+- The contracts that tie the pieces together: HTTP endpoints, JSON shapes, Go interfaces, and the database schema.
+- The integration decisions that keep tracking fast, safe, and privacy-aware.
+
+## What it does not cover
+
+- Deep internals of the generic pipeline library (see `plans/pipeline-working/plan.mdx`).
+- Production deployment, observability dashboards, or load testing.
+- Fine-grained React or Go package internals that do not affect the integration.
+
+## Big picture
+
+A shopper uses the **e-commerce SPA**. A tiny standalone **tracking script** watches what they do and sends well-formed events to the **Go API**. The API does not write directly to the database; it hands every event to a reusable **pipeline library** that cleans, filters, enriches, and de-duplicates it. Only the surviving output is stored, together with per-stage pipeline metrics. The SPA's dashboard then reads the stored data back via the API and shows live charts.
+
+<Diagram id="big-picture" caption="Four components and one database. Arrows show the direction of data; the dashboard is read-only.">
+
+```html
+<div class="diagram-panel" data-rough>
+  <div class="diagram-card">
+    <div class="diagram-node">Ecom SPA</div>
+    <div class="diagram-muted">ecom/</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-card">
+    <div class="diagram-node">Tracker</div>
+    <div class="diagram-muted">scripts/</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-card">
+    <div class="diagram-node">Go API</div>
+    <div class="diagram-muted">api/</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-card">
+    <div class="diagram-node">Pipeline</div>
+    <div class="diagram-muted">pipeline/</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-card">
+    <div class="diagram-node">SQLite</div>
+    <div class="diagram-muted">events · stage_metrics</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-card">
+    <div class="diagram-node">Dashboard</div>
+    <div class="diagram-muted">ecom/dashboard</div>
+  </div>
+</div>
+```
+
+```css
+.diagram-panel { display: flex; align-items: center; gap: 8px; padding: 16px; flex-wrap: wrap; justify-content: center; }
+.diagram-card { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 80px; }
+.diagram-node { padding: 8px 12px; border: 2px solid var(--wf-ink); border-radius: var(--wf-radius); background: var(--wf-card); white-space: nowrap; }
+.diagram-muted { font-size: 12px; color: var(--wf-muted); }
+.diagram-pill { font-size: 18px; color: var(--wf-accent); }
+```
+
+</Diagram>
+
+## The four pieces and their single job
+
+<Table
+  id="piece-roles"
+  columns={["Piece", "Folder", "Single job"]}
+  rows={[
+    ["E-commerce SPA", "`ecom/`", "The shop the user sees: products, cart, checkout, login, and the analytics dashboard."],
+    ["Tracking script", "`scripts/tracker.js`", "Capture user actions in the browser and transport them to the API without blocking the page."],
+    ["Go API", "`api/`", "Receive events, authenticate users, queue events into the pipeline, and serve stats back to the dashboard."],
+    ["Pipeline library", "`pipeline/`", "Clean, filter, enrich, and de-duplicate a stream of events in bounded memory with per-stage metrics."],
+  ]}
+/>
+
+Each piece only knows the public contract of the next piece. The SPA does not know the pipeline exists; the tracker does not know SQLite exists; the API does not know React exists. This keeps every component replaceable.
+
+## Concrete walkthrough: one Purchase event
+
+Imagine a logged-in shopper with a non-empty cart clicks **Place order** on the checkout page. Here is the entire path of the `Purchase` event.
+
+### 1. Browser: the action happens
+
+The checkout page (`ecom/app/routes/checkout.tsx`) calls `tracker.purchase(...)` with the order id, total, currency, and items. This is a thin TypeScript wrapper over the global `window.mable` object, which is loaded from `scripts/tracker.js` via a `<script src="/tracker.js">` tag in `ecom/app/root.tsx`.
+
+<AnnotatedCode
+  id="checkout-purchase-call"
+  filename="ecom/app/routes/checkout.tsx"
+  language="tsx"
+  code={"tracker.purchase({\n  order_id: orderId,\n  amount: total,\n  currency: \"USD\",\n  items: items.map((i) => ({ id: i.id, qty: i.quantity, price: i.price })),\n  item_count: items.reduce((n, i) => n + i.quantity, 0),\n});"}
+  annotations={[
+    {
+      lines: "1-6",
+      label: "Purchase signal",
+      note: "The React app never waits for this call. It is fire-and-forget."
+    }
+  ]}
+/>
+
+### 2. Tracker script: build the event
+
+`tracker.js` constructs a full `IngestEvent` JSON object. It collects browser-only fields such as user agent, timezone, screen size, URL, referrer, and a session id. It coerces every `properties` value to a string to match the API's `map[string]string` contract, and promotes `amount` / `currency` to top-level fields.
+
+<AnnotatedCode
+  id="tracker-build-event"
+  filename="scripts/tracker.js"
+  language="js"
+  code={"return {\n  event_type: type,\n  user_id: state.userId || \"\",\n  session_id: getSessionId(),\n  timestamp: new Date().toISOString(),\n  url: location.href,\n  referrer: document.referrer || \"\",\n  user_agent: ctx.user_agent || \"\",\n  amount: amount,\n  currency: currency,\n  properties: p,\n  consent: config.consent === true,\n};"}
+  annotations={[
+    {
+      lines: "1-11",
+      note: "The script deliberately does NOT send IP or geo. Those are added server-side from the connection."
+    }
+  ]}
+/>
+
+The event is buffered. When the batch reaches 10 events, or after 5 seconds, or when the tab hides, the script flushes the batch via `navigator.sendBeacon` (or `fetch(keepalive)`) to `POST /api/events`.
+
+### 3. Go API: accept and queue
+
+`api/internal/handlers/events.go` accepts a single event or a JSON array. It immediately stamps the real IP address and server receipt time onto the event, then calls `worker.Submit(...)`.
+
+<AnnotatedCode
+  id="api-ingest-handler"
+  filename="api/internal/handlers/events.go"
+  language="go"
+  code={"ip := c.ClientIP()\nua := c.Request.UserAgent()\nnow := time.Now().UTC()\n\naccepted, dropped := 0, 0\nfor _, in := range events {\n  if h.worker.Submit(in.ToEvent(ip, ua, now)) {\n    accepted++\n  } else {\n    dropped++\n  }\n}\n\nc.JSON(http.StatusAccepted, gin.H{\n  \"accepted\": accepted,\n  \"dropped\":  dropped,\n})"}
+  annotations={[
+    {
+      lines: "1-12",
+      label: "202 Accepted",
+      note: "The HTTP response returns immediately. The browser never waits for the database write."
+    }
+  ]}
+/>
+
+`Submit` places the event onto a bounded channel. If the channel is full, the event is dropped and counted — tracking must never block the UI.
+
+### 4. Pipeline library: the windowed run
+
+One background worker (`api/internal/ingest/worker.go`) drains the channel into a bounded **window**. A window closes at 2048 events or 500ms, whichever comes first. The worker then runs the entire window through one fresh `pipeline.Pipeline[Event]`.
+
+The pipeline is built in `api/internal/ingest/pipeline.go`:
+
+<AnnotatedCode
+  id="api-pipeline-build"
+  filename="api/internal/ingest/pipeline.go"
+  language="go"
+  code={"return pipeline.New[pipeline.Event](opts...).\n  Filter(\"consent\", hasConsent).\n  Map(\"normalize\", normalize).\n  Filter(\"tracked\", func(e pipeline.Event) bool { return trackedTypes[e.EventType] }).\n  Map(\"enrich_geo\", enrichGeo).\n  Stage(pipeline.NewChurnEnrich()).\n  Deduplicate(\"dedup\", dedupKey, cfg.DedupCapacity)"}
+  annotations={[
+    {
+      lines: "1-7",
+      label: "Stage order",
+      note: "Consent is checked first. Normalization runs before the whitelist so 'purchase' and 'Purchase' both map to the canonical type."
+    }
+  ]}
+/>
+
+For our Purchase event, the stages do the following:
+
+<Table
+  id="purchase-stage-walkthrough"
+  columns={["Stage", "What happens to the Purchase event"]}
+  rows={[
+    ["`consent`", "The handler stamped `_consent: true` in the properties, so the event passes."],
+    ["`normalize`", "Trims whitespace, canonicalises `event_type` to `Purchase`, upper-cases currency, clamps negative amount to 0, and bounds the payload."],
+    ["`tracked`", "`Purchase` is in the whitelist of seven canonical types, so it passes."],
+    ["`enrich_geo`", "Adds `geo_region`, `timezone`, `device`, and `browser` derived from the server-side IP and user agent."],
+    ["`churn_enrich`", "The custom example stage attaches a churn-probability score to the Purchase event."],
+    ["`dedup`", "Drops the event only if the same session + type + minute was already seen in this window."],
+  ]}
+/>
+
+### 5. SQLite: persist events and metrics
+
+After the window finishes, the worker writes the surviving events in one transaction and the per-stage `StageMetric` records in another. The `events` table holds the cleaned data; the `stage_metrics` table holds items in/out, drops, errors, latencies, and throughput per stage.
+
+### 6. Dashboard: read it back
+
+The dashboard route (`ecom/app/routes/dashboard.tsx`) calls `GET /api/stats` with credentials, which computes aggregates over the stored events and returns counts, capture times, and per-stage rollups. The dashboard renders them as charts.
+
+## How the pipeline library works
+
+The pipeline in `pipeline/` is a **homogeneous, concurrent, streaming pipeline**. That means every stage operates on the same element type (`Event` in the API), elements are moved in dynamically-sized batches through bounded channels, and each stage fans out across a pool of worker goroutines. The API uses it by creating a new `Pipeline[Event]` for every window of events.
+
+### The three runtime phases
+
+<Diagram id="pipeline-lifecycle" caption="One pipeline run. Batcher and stages are concurrent; the sink is single-threaded.">
+
+```html
+<div class="diagram-stack" data-rough>
+  <div class="diagram-row">
+    <div class="diagram-card"><div class="diagram-node">Source</div><div class="diagram-muted">chan T</div></div>
+    <div class="diagram-arrow">→</div>
+    <div class="diagram-card"><div class="diagram-node">Batcher</div><div class="diagram-muted">1 goroutine</div></div>
+    <div class="diagram-arrow">→</div>
+    <div class="diagram-card"><div class="diagram-node">Stage 1</div><div class="diagram-muted">N workers</div></div>
+    <div class="diagram-arrow">→</div>
+    <div class="diagram-card"><div class="diagram-node">Stage 2</div><div class="diagram-muted">N workers</div></div>
+    <div class="diagram-arrow">→</div>
+    <div class="diagram-card"><div class="diagram-node">Sink</div><div class="diagram-muted">1 goroutine</div></div>
+  </div>
+</div>
+```
+
+```css
+.diagram-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
+.diagram-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.diagram-card { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 70px; }
+.diagram-node { padding: 8px 12px; border: 2px solid var(--wf-ink); border-radius: var(--wf-radius); background: var(--wf-card); white-space: nowrap; }
+.diagram-muted { font-size: 12px; color: var(--wf-muted); }
+.diagram-arrow { font-size: 18px; color: var(--wf-accent); }
+```
+
+</Diagram>
+
+1. **Batching.** A single `batcher` goroutine reads from the source channel, accumulates elements into batches of up to `BatchSize`, and flushes any partial batch after `BatchTimeout`. It writes `[]T` batches to the first inter-stage channel.
+2. **Stage execution.** Each stage launches `WorkerCount` goroutines. Each worker pulls a batch, calls `Process`, and writes the result to the next channel. Stages are chained: stage N's output channel is stage N+1's input channel.
+3. **Sink drain.** A single goroutine consumes the final channel and calls the sink's `Consume` method. Because the sink is single-threaded, accumulators like `Collect` or `Reduce` need no locks.
+
+### Back-pressure and bounded channels
+
+Every inter-stage channel is bounded. If a downstream stage is slow, its inbound channel fills, which blocks the upstream stage's workers. That naturally throttles the whole stream without any explicit rate limiter. In the API, the worker drops events when the ingest queue is full, so the HTTP handler never blocks on a slow pipeline.
+
+### Error policies
+
+When a stage returns an error (or panics), the pipeline can react in two ways:
+
+<Table
+  id="pipeline-error-policies"
+  columns={["Policy", "Behaviour", "When to use it"]}
+  rows={[
+    ["`SkipAndCount` (default)", "Drop the failing batch, increment the stage error counter, keep the pipeline running.", "Streaming analytics — one bad event must not stop ingestion."],
+    ["`FailFast`", "Cancel the run context on the first error; all goroutines drain and exit.", "Batch jobs where correctness matters more than availability."],
+  ]}
+/>
+
+### Per-stage metrics
+
+Every run produces a `StageMetric` for each stage (and the sink): items in/out, dropped, errors, batch count, total latency, p50/p99 latencies, wall time, and throughput. Each worker accumulates its own stats locally and merges them only when the stage finishes, so measuring does not add contention on the hot path.
+
+In the API, the worker writes these metrics to the `stage_metrics` table after every window, giving sub-second visibility into the pipeline without any lock on the measured path.
+
+## The contracts between pieces
+
+<Table
+  id="integration-contracts"
+  columns={["Boundary", "Contract", "Why it is shaped this way"]}
+  rows={[
+    ["SPA ↔ Tracker", "`window.mable` global object", "The tracker is a standalone script, not a React component. Any third-party site can load it the same way."],
+    ["Tracker ↔ API", "`POST /api/events` with `IngestEvent` JSON array", "Batched JSON keeps transport efficient and the API can accept one event or many."],
+    ["API ↔ Worker", "Bounded channel of `pipeline.Event`", "Decouples fast HTTP handlers from slow disk writes. Bounded capacity provides back-pressure."],
+    ["Worker ↔ Pipeline", "`Pipeline[Event]` with `Collect` sink", "The API reuses the same generic library as the benchmark."],
+    ["Pipeline ↔ DB", "`eventSink` implementing `CollectSink[Event]`", "A small seam; swapping SQLite for Postgres or ClickHouse only changes this sink."],
+    ["API ↔ Dashboard", "`GET /api/stats` returning `Stats` JSON", "Read-only stats query, cookie-gated so only logged-in users can view analytics."],
+  ]}
+/>
+
+## Key integration decisions
+
+### The browser-vs-server split
+
+The browser deliberately sends only what it can know: user agent, URL, timezone, screen size, session, and user id. The server adds the IP address and receipt time, then derives geo and device fields from those. This prevents a malicious client from lying about its location or spoofing timestamps.
+
+### The windowed pipeline
+
+The pipeline library flushes per-stage metrics only once per run. If the API ran one perpetual pipeline, metrics would never reach the database until shutdown. The API therefore runs one bounded pipeline per window, giving sub-second metric updates while keeping at most one window of events in memory.
+
+### Non-blocking transport at every layer
+
+- The tracker batches events and sends them with `sendBeacon` or `fetch(keepalive)`.
+- The API returns `202 Accepted` before the database write.
+- The worker drops events when the queue is full rather than blocking HTTP handlers.
+
+### Cookie-based auth
+
+Login and signup issue an HS256 JWT in an `HttpOnly` cookie. The JavaScript never sees the token, which protects against XSS theft. Every API call uses `credentials: "include"`, and CORS is locked to the exact SPA origin.
+
+## Data model
+
+<DataModel
+  id="end-to-end-data-model"
+  entities={[
+    {
+      id: "users",
+      name: "users",
+      fields: [
+        { name: "id", type: "INTEGER", pk: true },
+        { name: "email", type: "TEXT" },
+        { name: "password_hash", type: "TEXT" },
+        { name: "created_at", type: "DATETIME" },
+      ],
+    },
+    {
+      id: "events",
+      name: "events",
+      fields: [
+        { name: "id", type: "INTEGER", pk: true },
+        { name: "event_type", type: "TEXT" },
+        { name: "user_id", type: "TEXT" },
+        { name: "session_id", type: "TEXT" },
+        { name: "ts", type: "DATETIME" },
+        { name: "url", type: "TEXT" },
+        { name: "referrer", type: "TEXT" },
+        { name: "ip", type: "TEXT" },
+        { name: "user_agent", type: "TEXT" },
+        { name: "amount", type: "REAL" },
+        { name: "currency", type: "TEXT" },
+        { name: "properties", type: "JSON" },
+        { name: "capture_ms", type: "REAL" },
+      ],
+    },
+    {
+      id: "stage_metrics",
+      name: "stage_metrics",
+      fields: [
+        { name: "id", type: "INTEGER", pk: true },
+        { name: "run_id", type: "TEXT" },
+        { name: "window_ts", type: "DATETIME" },
+        { name: "stage_name", type: "TEXT" },
+        { name: "items_in", type: "INTEGER" },
+        { name: "items_out", type: "INTEGER" },
+        { name: "dropped", type: "INTEGER" },
+        { name: "errors", type: "INTEGER" },
+        { name: "batches", type: "INTEGER" },
+        { name: "p50_ns", type: "INTEGER" },
+        { name: "p99_ns", type: "INTEGER" },
+        { name: "throughput", type: "REAL" },
+      ],
+    },
+  ]}
+/>
+
+## Tunable parameters
+
+The end-to-end flow has three layers of knobs: the tracker in the browser, the ingest/windowing layer in the API, and the generic pipeline library itself. Each can be adjusted without touching the others.
+
+### Pipeline library parameters
+
+Set on the `Pipeline[T]` via `With*` options.
+
+<Table
+  id="pipeline-parameters"
+  columns={["Parameter", "Default", "What it controls", "Option"]}
+  rows={[
+    ["`BatchSize`", "256", "Maximum elements per batch before a stage runs.", "`WithBatchSize(n)`"],
+    ["`WorkerCount`", "NumCPU", "Goroutines fanned out per stage.", "`WithWorkerCount(n)` (0 means NumCPU)"],
+    ["`ChannelBufferDepth`", "8", "Inter-stage channel buffer, in batches.", "`WithChannelBufferDepth(n)`"],
+    ["`BatchTimeout`", "5ms", "Flush a partial batch after this idle time.", "`WithBatchTimeout(d)`"],
+    ["`OnError`", "SkipAndCount", "Drop a failed batch and count it, or fail the whole run.", "`WithErrorPolicy(SkipAndCount \| FailFast)`"],
+    ["`MetricsSink`", "nil", "Receiver for per-stage metrics at the end of each run.", "`WithMetricsSink(s)`"],
+  ]}
+/>
+
+### API ingest / windowing parameters
+
+Set via environment variables in `api/internal/config/config.go`.
+
+<Table
+  id="api-parameters"
+  columns={["Env variable", "Default", "What it controls"]}
+  rows={[
+    ["`INGEST_BUFFER_DEPTH`", "8192", "Capacity of the bounded ingest channel. Full means drop and count."],
+    ["`WINDOW_DURATION`", "500ms", "Maximum time a window waits before flushing."],
+    ["`WINDOW_MAX_EVENTS`", "2048", "Maximum events per window before flushing."],
+    ["`PIPELINE_BATCH_SIZE`", "256", "Passed to `WithBatchSize` for each window's pipeline."],
+    ["`PIPELINE_WORKERS`", "0", "Passed to `WithWorkerCount` (0 = NumCPU)."],
+    ["`PIPELINE_CHANNEL_BUFFER`", "8", "Passed to `WithChannelBufferDepth`."],
+    ["`PIPELINE_BATCH_TIMEOUT`", "5ms", "Passed to `WithBatchTimeout`."],
+    ["`DEDUP_CAPACITY`", "200000", "Bound on the deduplication LRU seen-set."],
+    ["`MAX_BODY_BYTES`", "1 MiB", "Largest ingest request body the API will accept."],
+  ]}
+/>
+
+### Tracker parameters
+
+Set when calling `window.mable.init({ ... })` from `scripts/tracker.js`.
+
+<Table
+  id="tracker-parameters"
+  columns={["Parameter", "Default", "What it controls"]}
+  rows={[
+    ["`endpoint`", "\"\"", "URL to `POST /api/events`."],
+    ["`consent`", "false", "Gate local transmission until the user accepts."],
+    ["`batchSize`", "10", "Flush when this many events are buffered."],
+    ["`flushIntervalMs`", "5000", "Flush any buffered events after this long."],
+    ["`maxQueueBytes`", "64 KB", "Cap for the persisted retry queue in localStorage."],
+    ["`debug`", "false", "Log to the browser console."],
+  ]}
+/>
+
+## API endpoints
+
+<Endpoint
+  id="events-endpoint"
+  method="POST"
+  path="/api/events"
+  summary="Ingest one or many tracking events"
+  auth="None"
+  request={{ "contentType": "application/json", "example": "[{ event_type: \"Purchase\", session_id: \"s1\", user_id: \"u1\", amount: 42, currency: \"usd\", consent: true }]" }}
+  responses={[
+    { "status": "202", "description": "Accepted", "example": "{ accepted: 1, dropped: 0 }" },
+    { "status": "400", "description": "Malformed JSON" },
+    { "status": "413", "description": "Payload too large" },
+  ]}
+>
+
+Receives a single event or a JSON array. Stamps IP, user agent, and receipt time, then queues for the pipeline.
+
+</Endpoint>
+
+<Endpoint
+  id="stats-endpoint"
+  method="GET"
+  path="/api/stats"
+  summary="Read analytics for the dashboard"
+  auth="Cookie (JWT)"
+  params={[
+    { name: "since", in: "query", type: "string", description: "RFC3339 timestamp" },
+    { name: "until", in: "query", type: "string", description: "RFC3339 timestamp" },
+    { name: "granularity", in: "query", type: "string", description: "minute | hour | day" },
+  ]}
+  responses={[
+    { "status": "200", "description": "Stats JSON", "example": "{ avg_capture_ms: 1.2, total_events: 42, events_over_time: [], type_counts: {}, stage_rollups: [] }" },
+    { "status": "401", "description": "Missing or expired session" },
+  ]}
+>
+
+Computes averages, counts, and per-stage rollups over the requested time range.
+
+</Endpoint>
+
+## File map
+
+<FileTree
+  id="end-to-end-file-map"
+  title="Key files on the end-to-end path"
+  entries={[
+    { path: "ecom/app/root.tsx", note: "Loads /tracker.js as a third-party script." },
+    { path: "ecom/app/lib/tracker.ts", note: "Typed wrapper around the global window.mable API." },
+    { path: "ecom/app/routes/checkout.tsx", note: "Emits Checkout, PaymentInfoAdded, and Purchase events." },
+    { path: "ecom/app/routes/dashboard.tsx", note: "Reads GET /api/stats and renders charts." },
+    { path: "scripts/tracker.js", note: "Standalone event collector and transport." },
+    { path: "api/internal/handlers/events.go", note: "HTTP ingest handler: stamp, queue, 202." },
+    { path: "api/internal/ingest/worker.go", note: "Windowed pipeline driver and DB flush." },
+    { path: "api/internal/ingest/pipeline.go", note: "Builds the 6-stage production pipeline." },
+    { path: "api/internal/store/store.go", note: "SQLite seam for events and stage_metrics." },
+    { path: "pipeline/pipeline.go", note: "Generic pipeline runtime: batcher, stage runners, sink." },
+  ]}
+/>
+
+## Verification
+
+You can run the whole flow locally with three commands:
+
+```bash
+# 1. Start the Go API (also serves /api/events and /api/stats)
+cd api && go run .
+
+# 2. In another terminal, start the SPA
+cd ecom && pnpm install && pnpm dev
+
+# 3. Open http://localhost:5173, accept tracking, sign up, add a product to cart,
+#    complete checkout, then visit http://localhost:5173/dashboard.
+```
+
+To see the pipeline directly without the browser:
+
+```bash
+cd api
+# ingest a single event
+curl -s -XPOST localhost:8080/api/events -H 'Content-Type: application/json' \
+  -d '{"event_type":"Purchase","session_id":"s1","user_id":"u1","amount":42,"currency":"usd","consent":true}'
+
+# read the stored metrics
+curl -s localhost:8080/metrics
+```
+
+## What to read next
+
+- `plans/pipeline-working/plan.mdx` — deep dive into the generic pipeline library internals.
+- `api/api-design.md` — API design decisions, failure modes, and scaling path.
+- `ecom/README.md` — how to run the shop and verify the full journey.
+- `architecture.html` — a self-contained HTML walkthrough of the same system with an animated event journey.

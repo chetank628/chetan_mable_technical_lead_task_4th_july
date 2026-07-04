@@ -1,0 +1,403 @@
+---
+title: "How the pipeline works"
+description: "A visual walkthrough of the generic, concurrent streaming pipeline library in Go."
+kind: plan
+localOnly: true
+---
+
+## Objective
+
+This plan explains the internal mechanics of the generic `pipeline` package (`/pipeline`) in `Mono`. It is a reusable, concurrent streaming pipeline library that powers both the standalone benchmark harness and the tracking API's event-processing path.
+
+The pipeline is **homogeneous** over a single element type `T`, moves elements through **bounded channels** in dynamically-sized batches, and fans each stage out across a pool of **worker goroutines**. Back-pressure is intrinsic: a slow downstream stage naturally throttles upstream because every inter-stage channel is bounded.
+
+### What this document covers
+
+- The end-to-end lifecycle of a batch: source → batcher → stage runner → sink.
+- The available stage types and their contracts.
+- The runtime configuration levers and their defaults.
+- Per-stage metrics and error handling.
+- How custom stages plug into the pipeline without touching core code.
+
+### What this document does not cover
+
+- API design decisions or deployment topology (see `api/api-design.md` and `DESIGN.md`).
+- Tracking-client event schema or the analytics DB schema.
+- Performance tuning recommendations for production workloads.
+
+## Worked example: event analytics pipeline
+
+This example mirrors the benchmark pipeline in `bench_test.go` and is close to the tracking API ingest path. The pipeline:
+
+1. Accepts `Event` values from a source channel.
+2. Filters out event types that are not in the tracked set.
+3. Enriches `Purchase` events with a churn probability score via the custom `ChurnEnrich` stage.
+4. Deduplicates by `SessionID + "|" + EventType` using a bounded LRU.
+5. Reduces the surviving stream into `map[string]int` — counts per event type.
+
+<Code
+  id="example-pipeline-code"
+  filename="pipeline/bench_test.go"
+  language="go"
+  caption="A representative pipeline: Filter -> ChurnEnrich -> Deduplicate -> Reduce."
+  code={"func benchEventPipeline() *Pipeline[Event] {\n\ttracked := map[string]bool{\n\t\t\"PageView\": true, \"Click\": true, \"AddToCart\": true,\n\t\t\"Checkout\": true, \"PaymentInfoAdded\": true, \"Purchase\": true, \"Lead\": true,\n\t}\n\treturn New[Event](WithBatchSize(1024)).\n\t\tFilter(\"tracked\", func(e Event) bool { return tracked[e.EventType] }).\n\t\tStage(NewChurnEnrich()).\n\t\tDeduplicate(\"by_session_type\", func(e Event) any { return e.SessionID + \"|\" + e.EventType }, 200_000)\n}"}
+/>
+
+### Stage flow for this pipeline
+
+<Diagram id="example-stage-flow" caption="Concrete stage flow for the event analytics pipeline. Each stage is a fan-out worker pool connected by bounded batch channels.">
+
+```html
+<div class="diagram-panel" data-rough>
+  <div class="diagram-box">
+    <div class="diagram-node">Source</div>
+    <div class="diagram-muted">[]Event</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-box">
+    <div class="diagram-node">Filter "tracked"</div>
+    <div class="diagram-muted">drop untracked</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-box">
+    <div class="diagram-node">ChurnEnrich</div>
+    <div class="diagram-muted">1:1 enrich</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-box">
+    <div class="diagram-node">Deduplicate</div>
+    <div class="diagram-muted">LRU by session|type</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-box">
+    <div class="diagram-node">Reduce</div>
+    <div class="diagram-muted">count by type</div>
+  </div>
+</div>
+```
+
+```css
+.diagram-panel { display: flex; align-items: center; gap: 8px; padding: 16px; }
+.diagram-box { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.diagram-node { padding: 8px 12px; border: 2px solid var(--wf-ink); border-radius: var(--wf-radius); background: var(--wf-card); }
+.diagram-muted { font-size: 12px; color: var(--wf-muted); }
+```
+
+</Diagram>
+
+### Concrete batch walkthrough
+
+Imagine the batcher emits a batch of 8 events. Each row shows how a single event moves through the stages.
+
+<Table
+  id="example-batch-walkthrough"
+  columns={["Event", "Filter", "ChurnEnrich", "Deduplicate", "Reduce output"]}
+  rows={[
+    ["`PageView, session=s1`", "pass", "pass", "pass (new key)", "`PageView: 1`"],
+    ["`Click, session=s1`", "pass", "pass", "pass (new key)", "`Click: 1`"],
+    ["`Heartbeat, session=s1`", "DROP", "—", "—", "—"],
+    ["`Purchase, session=s2, amount=250`", "pass", "enrich churn=0.32", "pass (new key)", "`Purchase: 1`"],
+    ["`PageView, session=s1`", "pass", "pass", "DROP (duplicate key)", "—"],
+    ["`AddToCart, session=s2`", "pass", "pass", "pass (new key)", "`AddToCart: 1`"],
+    ["`Purchase, session=s2, amount=10`", "pass", "enrich churn=0.94", "DROP (duplicate key)", "—"],
+    ["`Click, session=s3`", "pass", "pass", "pass (new key)", "`Click: 2`"]
+  ]}
+/>
+
+At the end of the batch the sink accumulator would contain:
+
+<Table
+  id="example-reduce-state"
+  columns={["EventType", "Count"]}
+  rows={[
+    ["`PageView`", "1"],
+    ["`Click`", "2"],
+    ["`Purchase`", "1"],
+    ["`AddToCart`", "1"]
+  ]}
+/>
+
+### What the batcher actually does
+
+With the default `BatchSize = 256`, the 8 events above are only one partial batch. Because the batcher also has `BatchTimeout = 5ms`, it flushes the partial batch quickly rather than waiting for 256 events. A high-volume stream would fill 256-element batches continuously, amortizing channel overhead.
+
+### What the worker pool does
+
+Each stage (`Filter`, `ChurnEnrich`, `Deduplicate`) runs with `runtime.NumCPU()` workers by default. Each worker independently pulls batches, calls `Process`, and writes the result. The order of events across the whole stream is **not preserved** — the duplicate `PageView` may be processed by a different worker than the original. Order-independent aggregation (count by key) is why this is safe.
+
+### Why the sink is single-threaded
+
+`Reduce` accumulates into a plain `map[string]int` on the goroutine that calls `p.execute`. It never needs a mutex because no other goroutine touches it; all upstream fan-out has already been serialized through the final channel. The same is true for `Collect` sinks.
+
+## End-to-end lifecycle
+
+A run is started by `Reduce` or `Collect`, both of which delegate to `Pipeline.execute`. The pipeline is built once, then executed once per input stream.
+
+<Diagram id="pipeline-lifecycle" caption="End-to-end batch flow. Orange nodes are concurrent; the sink is single-threaded.">
+
+```html
+<div class="diagram-panel" data-rough>
+  <div class="diagram-box">
+    <div class="diagram-node">Source</div>
+    <div class="diagram-muted">chan T</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-box">
+    <div class="diagram-node">Batcher</div>
+    <div class="diagram-muted">1 goroutine</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-box">
+    <div class="diagram-node">Stage 1</div>
+    <div class="diagram-muted">N workers</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-box">
+    <div class="diagram-node">Stage 2</div>
+    <div class="diagram-muted">N workers</div>
+  </div>
+  <div class="diagram-pill">→</div>
+  <div class="diagram-box">
+    <div class="diagram-node">Sink</div>
+    <div class="diagram-muted">1 goroutine</div>
+  </div>
+</div>
+```
+
+```css
+.diagram-panel { display: flex; align-items: center; gap: 8px; padding: 16px; }
+.diagram-box { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.diagram-node { padding: 8px 12px; border: 2px solid var(--wf-ink); border-radius: var(--wf-radius); background: var(--wf-card); }
+.diagram-muted { font-size: 12px; color: var(--wf-muted); }
+```
+
+</Diagram>
+
+### The three runtime phases
+
+1. **Batching.** `batcher` reads elements from the source `chan T`, accumulates them into batches of up to `BatchSize`, and flushes any partial batch after `BatchTimeout`. It writes `[]T` batches to the first inter-stage channel.
+2. **Stage execution.** `runStage` launches `WorkerCount` goroutines. Each worker pulls batches from the inbound channel, calls `Stage.Process` (wrapped in `safeProcess` for panic recovery), and writes the result batch to the outbound channel. Stages are chained: stage N's outbound channel is stage N+1's inbound channel.
+3. **Sink drain.** `drainSink` runs on the caller's goroutine and consumes the final channel. It calls `Sink.Consume` for each batch. Because the sink is single-threaded, accumulators like `Reduce`'s `map[K]R` are race-free without locks.
+
+The `execute` function coordinates shutdown with a cancellable `context.Context`. On `FailFast`, the first error cancels the context so all goroutines drain and exit.
+
+### Key code paths
+
+<TabsBlock
+  id="pipeline-key-files"
+  tabs={[
+    {
+      id: "pipeline-go",
+      label: "pipeline.go",
+      blocks: [
+        {
+          id: "pipeline-go-orchestration",
+          type: "annotated-code",
+          data: {
+            filename: "pipeline/pipeline.go",
+            language: "go",
+            code: "// execute wires up the batcher, stage runners, and sink, then runs to\n// completion. It is the single orchestration path shared by Collect and Reduce.\nfunc (p *Pipeline[T]) execute(ctx context.Context, source <-chan T, sink Sink[T]) ([]StageMetric, error) {\n\tctx, cancel := context.WithCancel(ctx)\n\tdefer cancel()\n\n\tbuf := p.cfg.ChannelBufferDepth\n\n\t// Batcher feeds the first channel with dynamically-sized batches.\n\thead := make(chan []T, buf)\n\tgo batcher(ctx, source, head, p.cfg.BatchSize, p.cfg.BatchTimeout)\n\n\tvar (\n\t\twg      sync.WaitGroup\n\t\tmetrics = make([]StageMetric, len(p.stages)+1)\n\t\tprev    = head\n\t)\n\tfor i, st := range p.stages {\n\t\tnext := make(chan []T, buf)\n\t\twg.Add(1)\n\t\tgo func(idx int, stage Stage[T], in <-chan []T, out chan []T) {\n\t\t\tdefer wg.Done()\n\t\t\tmetrics[idx] = runStage(ctx, cancel, stage, in, out, p.cfg, setErr)\n\t\t}(i, st, prev, next)\n\t\tprev = next\n\t}\n\n\t// Drain the sink on this goroutine (single-threaded => race-free accumulator).\n\tsinkMetric := drainSink(ctx, cancel, sink, prev, p.cfg, setErr)\n\tmetrics[len(p.stages)] = sinkMetric\n\n\twg.Wait()\n\treturn metrics, runErr\n}",
+            annotations: [
+              {
+                lines: "7",
+                label: "Bounded channels",
+                note: "Buffer depth is measured in batches, not elements."
+              },
+              {
+                lines: "10",
+                label: "Single batcher",
+                note: "One goroutine collects source elements into batches."
+              },
+              {
+                lines: "16-22",
+                label: "Stage chain",
+                note: "Each stage gets its own inbound channel and outbound channel."
+              },
+              {
+                lines: "25",
+                label: "Sink drain",
+                note: "Runs on the caller goroutine so keyed accumulators need no locks."
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      id: "stage-go",
+      label: "stage.go",
+      blocks: [
+        {
+          id: "stage-go-interface",
+          type: "annotated-code",
+          data: {
+            filename: "pipeline/stage.go",
+            language: "go",
+            code: "// Stage is the single extension point of the library. Any type implementing\n// Stage can be added to a pipeline via Pipeline.Stage, with no changes to the\n// core.\ntype Stage[T any] interface {\n\t// Name identifies the stage in metrics and error messages.\n\tName() string\n\t// Process transforms an inbound batch into an outbound batch.\n\tProcess(ctx context.Context, in []T) (out []T, dropped int, err error)\n}",
+            annotations: [
+              {
+                lines: "1-3",
+                label: "Extension protocol",
+                note: "Custom stages implement this interface."
+              },
+              {
+                lines: "8",
+                label: "Batch contract",
+                note: "dropped counts elements intentionally discarded."
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      id: "reduce-go",
+      label: "reduce.go",
+      blocks: [
+        {
+          id: "reduce-go-sink",
+          type: "annotated-code",
+          data: {
+            filename: "pipeline/reduce.go",
+            language: "go",
+            code: "// Sink is a terminal stage that drains the stream.\ntype Sink[T any] interface {\n\tName() string\n\tConsume(ctx context.Context, in []T) (dropped int, err error)\n}\n\n// Reduce terminates a pipeline by folding the whole stream into a keyed map.\nfunc Reduce[T any, K comparable, R any](\n\tctx context.Context,\n\tp *Pipeline[T],\n\tsource <-chan T,\n\tkey func(T) K,\n\tinit func() R,\n\treduce func(acc R, v T) R,\n) (map[K]R, []StageMetric, error) {\n\ts := &reduceSink[T, K, R]{\n\t\tname:    \"reduce\",\n\t\tkeyFn:   key,\n\t\tinitFn:  init,\n\t\treducer: reduce,\n\t\tacc:     make(map[K]R),\n\t}\n\tmetrics, err := p.execute(ctx, source, s)\n\treturn s.acc, metrics, err\n}",
+            annotations: [
+              {
+                lines: "7-12",
+                label: "Reduce signature",
+                note: "Package-level function because it introduces K and R type parameters."
+              },
+              {
+                lines: "16",
+                label: "Global accumulator",
+                note: "The map is filled on the single-threaded sink goroutine."
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]}
+/>
+
+## Built-in stages
+
+The `Pipeline[T]` builder exposes fluent methods for the common primitives. Each appends a `Stage[T]` implementation to the internal `stages` slice.
+
+<Table
+  id="stage-types"
+  columns={["Stage", "Builder", "Signature", "Behaviour"]}
+  rows={[
+    ["Map", "`.Map(name, fn)`", "`func(T) T`", "1:1 transform."],
+    ["Filter", "`.Filter(name, pred)`", "`func(T) bool`", "Drops elements where the predicate returns false."],
+    ["Generate", "`.Generate(name, fn)`", "`func(T) []T`", "1:N expansion; emits zero or more produced elements per input."],
+    ["If", "`.If(name, pred, then, els)`", "`pred, then, els *Pipeline[T]`", "Routes each element into one of two sub-pipelines; outputs merge downstream."],
+    ["Deduplicate", "`.Deduplicate(name, key, capacity)`", "`key func(T) any, capacity int`", "Drops repeat keys using a bounded LRU seen-set."],
+    ["Stage", "`.Stage(s)`", "`Stage[T]`", "Open extension point for any custom stage."]
+  ]}
+/>
+
+### Deduplicate is a global synchronization point
+
+The built-in `dedupStage` holds a single `sync.Mutex` and a `container/list` LRU. Every worker serializes on that mutex when processing a batch. This is intentional: exact deduplication across the whole stream requires shared state. The bounded LRU keeps memory usage predictable, but once a key is evicted a later repeat becomes a false negative.
+
+<Callout id="dedup-tradeoff" tone="info">
+
+Set `capacity = 0` for an exact, unbounded seen-set. Use a bounded capacity when the stream is large and approximate deduplication is acceptable.
+
+</Callout>
+
+## Configuration levers
+
+All hyper-parameters are set via functional options on `New`. Invalid values are clamped so degenerate configs still run.
+
+<Table
+  id="config-options"
+  columns={["Option", "Default", "Meaning"]}
+  rows={[
+    ["`WithBatchSize(n)`", "256", "Maximum elements per batch."],
+    ["`WithWorkerCount(n)`", "`runtime.NumCPU()`", "Goroutines fanned out per stage."],
+    ["`WithChannelBufferDepth(n)`", "8", "Inter-stage channel buffer in batches; 0 = unbuffered."],
+    ["`WithBatchTimeout(d)`", "5ms", "Flushes a partial batch after d; <=0 disables."],
+    ["`WithErrorPolicy(p)`", "`SkipAndCount`", "`SkipAndCount` or `FailFast`."],
+    ["`WithMetricsSink(s)`", "nil", "Receives the per-stage metrics snapshot at end of run."]
+  ]}
+/>
+
+## Per-stage metrics
+
+Every run produces a `[]StageMetric` with one entry per stage plus one for the sink. `Pipeline.Metrics()` returns a copy of the most recent snapshot.
+
+<Table
+  id="metric-fields"
+  columns={["Field", "Type", "Meaning"]}
+  rows={[
+    ["`Name`", "string", "Stage or sink name."],
+    ["`ItemsIn`", "int64", "Elements that entered the stage."],
+    ["`ItemsOut`", "int64", "Elements emitted downstream."],
+    ["`Dropped`", "int64", "Elements intentionally discarded."],
+    ["`Errors`", "int64", "Batches that failed under `SkipAndCount`."],
+    ["`Batches`", "int64", "Batches processed by the stage."],
+    ["`TotalLatency`", "time.Duration", "Summed wall time inside `Process` calls."],
+    ["`P50 / P99`", "time.Duration", "Per-batch processing latency percentiles."],
+    ["`Wall`", "time.Duration", "Wall-clock time the runner was active."],
+    ["`Throughput`", "float64", "ItemsOut / Wall in items/sec."]
+  ]}
+/>
+
+The hot path keeps worker-local stats and merges them once at the end. No locks or atomics are touched during steady-state processing.
+
+## Error handling
+
+`safeProcess` wraps every `Stage.Process` call in a `recover` that converts panics into counted errors. The configured `ErrorPolicy` decides what happens next.
+
+<Callout id="error-policy" tone="warning">
+
+- **`SkipAndCount`** (default): the offending batch's output is dropped, the stage error counter is incremented, and the pipeline keeps running. This is appropriate for streaming analytics where one bad event must not stop the whole stream.
+- **`FailFast`**: the first error or panic sets `runErr`, cancels the context, and every goroutine drains. The first error is returned from the run.
+
+</Callout>
+
+## Extension protocol
+
+Custom stages implement `Stage[T]` and are added with `Pipeline.Stage`. No core file needs to change. The example below is the `ChurnEnrich` stage shipped in `examples_stage.go`.
+
+<Code
+  id="custom-stage-example"
+  filename="pipeline/examples_stage.go"
+  language="go"
+  caption="A custom stage enriches Purchase events with a churn probability score."
+  code={"type ChurnEnrich struct{ StageName string }\n\nfunc (c ChurnEnrich) Name() string { return c.StageName }\n\nfunc (c ChurnEnrich) Process(_ context.Context, in []Event) ([]Event, int, error) {\n\tout := make([]Event, len(in))\n\tfor i, e := range in {\n\t\tif e.EventType == \"Purchase\" {\n\t\t\te.ChurnProbability = churnScore(e)\n\t\t}\n\t\tout[i] = e\n\t}\n\treturn out, 0, nil\n}"}
+/>
+
+## Verification
+
+The pipeline is exercised by the existing test suite. The most relevant commands to confirm current behaviour are:
+
+```bash
+# Run unit tests and race detector against the pipeline package.
+go test -race ./pipeline/...
+
+# Run benchmarks (optional, but proves the batch/worker runtime is intact).
+go test -run=NONE -bench=. -benchmem ./pipeline/...
+```
+
+## File map
+
+The pipeline implementation is split across focused files.
+
+<FileTree
+  id="pipeline-file-map"
+  title="Pipeline package files"
+  entries={[
+    { path: "pipeline/pipeline.go", note: "Pipeline[T], builder DSL, batcher, stage runners, sink drain." },
+    { path: "pipeline/stage.go", note: "Stage[T] interface and Map/Filter/Generate/Deduplicate." },
+    { path: "pipeline/route.go", note: "If routing and sub-pipeline merge." },
+    { path: "pipeline/reduce.go", note: "Reduce[T,K,R] sink, Collect, ChannelSink." },
+    { path: "pipeline/metrics.go", note: "StageMetric, merge/percentiles, MetricsSink." },
+    { path: "pipeline/config.go", note: "Functional options and defaults." },
+    { path: "pipeline/examples_stage.go", note: "Event type and ChurnEnrich example." },
+    { path: "pipeline/pipeline_test.go", note: "Unit tests and edge cases." },
+    { path: "pipeline/bench_test.go", note: "Benchmarks and TestStruct." }
+  ]}
+/>
