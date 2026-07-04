@@ -16,6 +16,9 @@ build/
 dist/
 .react-router/
 
+# IDE/tool folders
+.devin/
+
 # OS files
 .DS_Store
 
